@@ -6,6 +6,8 @@
 *.o
 *.pm.tdy
 *.bs
+*.S
+*.wasm
 
 # Devel::Cover
 cover_db/
@@ -28,7 +30,6 @@ inc/
 /blib/
 /_eumm/
 /*.gz
-/Makefile
 /Makefile.old
 /MANIFEST.bak
 /pm_to_blib
