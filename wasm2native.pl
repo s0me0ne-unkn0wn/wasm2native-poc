@@ -32,6 +32,7 @@ die "Wrong signature" unless $magic eq "\x00asm";
 l "WASM version $version";
 
 my (@TYPE, @FTYPE, @EXPORT);
+my @abi_param_regs = qw(rdi rsi rdx rcx r8 r9);
 
 sub parse_type_section() {
 	my $ntypes = unpack('C', take(1));
@@ -91,12 +92,26 @@ my %OPCODE = (
 );
 
 
-sub parse_code($fname) {
+sub parse_code($findex, $fname, $locals) {
 	my $lblgid = 0;
 	my $blkid = 0;
 	my @frames = ({ type => 'func' });
 	say 'push rbp';
 	say 'mov rbp, rsp';
+	# Function call must obey SysV ABI as exported and imported functions use it to communicate
+	# with the outer world
+	my $type = $FTYPE[$findex]{type};
+	l "Type: " . $type;
+	die "Number of parameters greater than " . scalar(@abi_param_regs) . " is not supported yet" if $type->{par}->@* > @abi_param_regs;
+
+	if(my $fullnlocals = $type->{par}->@* + @$locals) {
+		say "\tsub rsp, " . ($fullnlocals * 8);
+
+		my @regs = @abi_param_regs;
+		for (1..scalar($type->{par}->@*)) {
+			say "\tmov [rsp+" . (($_ - 1) * 8) . "], " . shift(@regs);
+		}
+	}
 
 	while($CODE) {
 		my $op = take_byte();
@@ -289,7 +304,7 @@ main:
 	xor rax, rax
 	call printf wrt ..plt
 	pop rbp
-	xor eax, eax
+	xor rax, rax
 	ret
 EOF
 ;
@@ -305,7 +320,7 @@ EOF
 			push @locals, $type for $num;
 		}
 		l "  Function with body size $size, local(s) [@locals]";
-		parse_code($fname);
+		parse_code($findex, $fname, \@locals);
 	}
 	say <<EOF
 section .data
