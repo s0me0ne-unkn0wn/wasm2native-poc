@@ -3,8 +3,9 @@
 use v5.30.0;
 use File::Slurp;
 use List::Util qw(sum max any);
-use DDP;
+use DDP multiline => 0;
 use feature qw(signatures);
+use bytes;
 no warnings qw(experimental::signatures);
 
 use constant TNONE => 0x40;
@@ -13,14 +14,18 @@ use constant TI64 => 0x7e;
 use constant TF32 => 0x7d;
 use constant TF64 => 0x7c;
 
+use constant TU32 => -127;
+
 sub TINT($type) { any { $type == $_ } (TI32, TI64) }
 sub TFLT($type) { any { $type == $_ } (TF32, TF64) }
 
 $ARGV[0] or die;
 
 my $CODE = read_file($ARGV[0], { binmode => ':raw' }) or die;
+my $code_length = bytes::length($CODE);
 
 sub l { say STDERR @_ }
+sub offset { sprintf('%08x:', $code_length - bytes::length($CODE)) }
 sub take($len) {
 	my $chunk = substr $CODE, 0, $len;
 	$CODE = substr $CODE, $len;
@@ -60,12 +65,19 @@ sub parse_exports_section() {
 	my $nexp = take_num();
 	l "Parsing $nexp export(s)";
 	for (1..$nexp) {
+		say offset();
 		my $name = take_name();
 		my $kind = take_byte();
-		my $index = take_num();
+		my $index = take_num(1);
 		l "  Export '$name', of kind $kind, index $index";
 		if($kind == 0) {
 			$EXPORT[$index] = { name => $name };
+		} elsif($kind == 1) {
+			l "    STUB table export";
+		} elsif($kind == 2) {
+			l "    STUB memory export";
+		} elsif($kind == 3) {
+			l "    STUB global export";
 		} else {
 			die "Unsupported export kind $kind";
 		}
@@ -78,6 +90,7 @@ my %OPCODE = (
 	# 0x0b => { name => 'end' },
 	# 0x0f => { name => 'return', code => [ 'pop rax', 'ret' ] },
 	0x1a => { name => 'drop', code => [ 'pop rax'] },
+	0x20 => { name => 'local.get \0', args => [ TU32 ], code => [ 'push [r10-%0]' ] },
 	0x41 => { name => 'i32.const \0', args => [ TI32 ], code => [ 'push \0' ] },
 	0x46 => { name => 'i32.eq', code => [
 		'pop rax',
@@ -96,20 +109,24 @@ sub parse_code($findex, $fname, $locals) {
 	my $lblgid = 0;
 	my $blkid = 0;
 	my @frames = ({ type => 'func' });
-	say 'push rbp';
-	say 'mov rbp, rsp';
+	say "\tpush rbp";
+	say "\tmov rbp, rsp";
+	say "\tmod r10, rsp";
 	# Function call must obey SysV ABI as exported and imported functions use it to communicate
 	# with the outer world
 	my $type = $FTYPE[$findex]{type};
-	l "Type: " . $type;
+	l "Type: " . np($type);
 	die "Number of parameters greater than " . scalar(@abi_param_regs) . " is not supported yet" if $type->{par}->@* > @abi_param_regs;
 
+	my @localmap;
 	if(my $fullnlocals = $type->{par}->@* + @$locals) {
 		say "\tsub rsp, " . ($fullnlocals * 8);
 
 		my @regs = @abi_param_regs;
 		for (1..scalar($type->{par}->@*)) {
-			say "\tmov [rsp+" . (($_ - 1) * 8) . "], " . shift(@regs);
+			my $addr = 8 * $_;
+			say "\tmov [r10-$addr], " . shift(@regs);
+			$localmap[$_ - 1] = $addr;
 		}
 	}
 
@@ -142,10 +159,12 @@ sub parse_code($findex, $fname, $locals) {
 					if(TINT($frame->{rtype})) {
 						say "\tpush rax";
 					}				
+				} else {
+					return;
 				}
 			}
 		} elsif($op == 0x0c) { # br
-			my $target = take_num();
+			my $target = take_num(1);
 			say "\t;; br $target";
 			my $tframe = $frames[$target];
 			if(TINT($tframe->{rtype})) {
@@ -159,7 +178,7 @@ sub parse_code($findex, $fname, $locals) {
 			}
 			say "\tjmp .${fname}_label_block_$tframe->{id}_branch_target";
 		} elsif($op == 0x0d) { # br_if
-			my $target = take_num();
+			my $target = take_num(1);
 			say "\t;; br_if $target";
 			my $tframe = $frames[$target];
 			my $lblid = $lblgid++;
@@ -181,7 +200,7 @@ sub parse_code($findex, $fname, $locals) {
 
 			say ".${fname}_label_br_else_$lblid:"
 		} elsif($op == 0x0f) { # return
-			say "\t;;return";
+			say "\t;; return";
 			say "\tpop rax";
 			while(@frames) {
 				say "\tmov rsp, rbp";
@@ -189,12 +208,33 @@ sub parse_code($findex, $fname, $locals) {
 				shift @frames;
 			}
 			say "\tret";
+		} elsif($op == 0x10) { # call
+			my $func = take_num(1);
+			my $type = $FTYPE[$func]{type};
+			my $fname = 'wasm_func_' . ($EXPORT[$func]{name} // $func);
+			say "\t;; call $func ($fname): " . np($type->{par}) . " -> " . np($type->{res});
+			if($type->{par}->@*) {
+				die "Number of parameters greater than " . scalar(@abi_param_regs) . " is not supported yet" if $type->{par}->@* > @abi_param_regs;
+				my @regs = @abi_param_regs[0..($type->{par}->@* - 1)];
+				say "\tpop " . pop(@regs) while @regs;
+			}
+			say "\txor rax, rax";
+			say "\tcall $fname";
+			if($type->{res}->@*) {
+				if(TINT($type->{res}[0])) {
+					say "\tpush rax";
+				} else {
+					die "Unsupported return type $type->{res}[0]";
+				}
+			}
 		} elsif(my $opcode = $OPCODE{$op}) {
 			my @args;
 			if($opcode->{args}) {
 				for ($opcode->{args}->@*) {
 					if(TINT($_)) {
 						push @args, take_num();
+					} elsif($_ == TU32) {
+						push @args, take_num(1);
 					} else {
 						die "Unsupported argument type";
 					}
@@ -207,6 +247,7 @@ sub parse_code($findex, $fname, $locals) {
 			for ($opcode->{code}->@*) {
 				my $o = $_;
 				$o =~ s/\\(\d)/$args[$1]/xg;
+				$o =~ s/%(\d+)/($args[$1] + 1) * 8/eg;
 				$o =~ s/@(\d+)/
 					my $lblid = $lblgid + $1;
 					$maxlblid = max($lblid, $1);
@@ -221,31 +262,10 @@ sub parse_code($findex, $fname, $locals) {
 	}
 }
 
-sub leb128($bytes, $pc) {
-	my $res = 0;
-	my $shift = 0;
-	my $sign;
-	while($bytes->@*) {
-		my $byte = $bytes->[$$pc++];
-		my $notlast = $byte & 0b10000000;
-		$sign //= $byte & 0b01000000;
-		$byte &= 0b1111111;
-		$res |= $byte << $shift;
-		$shift += 7;
-		last unless $notlast;
-	}
-	$res |= (~0 << $shift) if $shift < 64 && $sign;
-	if($res & 0x8000_0000_0000_0000) {
-		$res -= 1;
-		$res = -~$res;
-	}
-	$res;
-}
-
 sub take_bytes($num) { unpack("C$num", take($num)) }
 sub take_byte() { take_bytes(1) }
 
-sub take_num() {
+sub take_num($unsigned = 0) {
 	my $res = 0;
 	my $shift = 0;
 	my $sign;
@@ -253,42 +273,54 @@ sub take_num() {
 	while($CODE) {
 		my $byte = unpack('C', substr $CODE, $took, 1);
 		my $notlast = $byte & 0b10000000;
-		$sign //= $byte & 0b01000000;
 		$byte &= 0b1111111;
 		$res |= $byte << $shift;
 		$shift += 7;
 		$took++;
-		last unless $notlast;
+		unless($notlast) {
+			$sign = $byte & 0b01000000;
+			last;
+		}
 	}
-	$res |= (~0 << $shift) if $shift < 64 && $sign;
-	if($res & 0x8000_0000_0000_0000) {
-		$res -= 1;
-		$res = -~$res;
+	unless($unsigned) {
+		$res |= (~0 << $shift) if $shift < 64 && $sign;
+		if($res & 0x8000_0000_0000_0000) {
+			$res -= 1;
+			$res = -~$res;
+		}
 	}
 	$CODE = substr $CODE, $took;
 	$res;
 }
 
 sub take_lparr_byte() {
-	my $len = take_num();
+	my $len = take_num(1);
 	return () unless $len;
 	take_bytes($len);
 }
 
-sub take_vec() {
-	my $len = take_num();
+sub take_vec($unsigned = 0) {
+	my $len = take_num(1);
 	return () unless $len;
-	map { take_num() } (1..$len);
+	map { take_num($unsigned) } (1..$len);
 }
 
 sub take_name() {
-	my $len = take_num();
+	my $len = take_num(1);
 	return '' unless $len;
 	unpack("A$len", take($len));
 }
 
+sub take_limits() {
+	my $has_max = take_byte();
+	my $min = take_num(1);
+	return { min => $min } unless $has_max;
+	my $max = take_num(1);
+	{ min => $min, max => $max };
+}
+
 sub parse_code_section() {
-	my $nfunc = take_num();
+	my $nfunc = take_num(1);
 	l "Parsing $nfunc function(s)";
 	say <<EOF
 section .text
@@ -320,7 +352,7 @@ EOF
 			push @locals, $type for $num;
 		}
 		l "  Function with body size $size, local(s) [@locals]";
-		parse_code($findex, $fname, \@locals);
+		parse_code($i, $fname, \@locals);
 	}
 	say <<EOF
 section .data
@@ -329,16 +361,133 @@ EOF
 ;
 }
 
+sub parse_imports_section() {
+	my $nimport = take_num(1);
+	l "Parsing $nimport import(s)";
+	for(my $i = 0; $i < $nimport; $i++) {
+		my $module = take_name();
+		my $name = take_name();
+		my $type = take_byte();
+		l "  Import $module\::$name: type $type";
+		if($type == 0x00) { # Function
+			my $typeidx = take_num(1);
+			l "    Function of type $typeidx";
+		} elsif($type == 0x01) { # Table
+			my $reftype = take_byte();
+			my $limits = take_limits();
+			my $table = { reftype => $reftype, %$limits };
+			l "    Table import " . np($table);
+		} elsif($type == 0x02) { # Memory
+			my $limits = take_limits();
+			l "    Memory import " . np($limits);
+		} elsif($type == 0x03) { # Global
+			my $valtype = take_byte();
+			my $mut = take_byte();
+			l "    Global import " . ($mut ? "mut " : "") . " type $valtype";
+		} else {
+			die "Unsupported import type $type";
+		}
+	}
+}
+
+sub parse_table_section() {
+	my $ntab = take_num(1);
+	l "Parsing $ntab table(s)";
+	for(my $i = 0; $i < $ntab; $i++) {
+		my $reftype = take_byte();
+		my $limits = take_limits();
+		my $table = { reftype => $reftype, %$limits };
+		l "  Table $i: " . np($table);
+	}
+}
+
+sub parse_memory_section() {
+	my $nmem = take_num(1);
+	l "Parsing $nmem memori(es)";
+	for(my $i = 0; $i < $nmem; $i++) {
+		my $limits = take_limits();
+		l "  Memory $i: " . np($limits);
+	}
+}
+
+sub parse_opcode($op) {
+	my $opcode = $OPCODE{$op};
+	die "Unsupported opcode $op" unless $opcode;
+	my @args;
+	if($opcode->{args}) {
+		for ($opcode->{args}->@*) {
+			if(TINT($_)) {
+				push @args, take_num();
+			} else {
+				die "Unsupported argument type";
+			}
+		}
+	}
+	$_ = $opcode->{name};
+	s/\\(\d)/$args[$1]/xg;
+	say "\t;; $_";
+	my $maxlblid = 0;
+	for ($opcode->{code}->@*) {
+		my $o = $_;
+		$o =~ s/\\(\d)/$args[$1]/xg;
+		say "\t$o";
+	}
+}
+
+sub parse_globals_section() {
+	my $nglob = take_num(1);
+	l "Parsing $nglob global(s)";
+	for(my $i = 0; $i < $nglob; $i++) {
+		my $valtype = take_byte();
+		my $mut = take_byte();
+		l "  Global $i type " . ($mut ? "mut " : "") . $valtype;
+		while($CODE) {
+			my $op = take_byte();
+			last if $op == 0x0b;
+			parse_opcode($op);
+		}
+	}
+}
+
+sub parse_elements_section() {
+	my $nelem = take_num(1);
+	l "Parsing $nelem element segment(s)";
+	for(my $i = 0; $i < $nelem; $i++) {
+		my $initial = take_num(1);
+		if($initial == 0x00) {
+			while($CODE) {
+				my $op = take_byte();
+				last if $op == 0x0b;
+				parse_opcode($op);
+			}
+			my @func = take_vec(1);
+			l "  References functions " . np(@func);
+		} else {
+			die "Unsupported element segment initial $initial";
+		}
+	}
+}
+
 while($CODE) {
 	my $type = take_byte();
-	my $len = take_num();
+	my $len = take_num(1);
 	l "Section type $type, length $len";
 	if($type == 1) {
 		parse_type_section();
+	} elsif($type == 2) {
+		parse_imports_section();
 	} elsif($type == 3) {
 		parse_function_section();
+	} elsif($type == 4) {
+		parse_table_section();
+	} elsif($type == 5) {
+		parse_memory_section();
+	} elsif($type == 6) {
+		parse_globals_section();
 	} elsif($type == 7) {
 		parse_exports_section();
+	} elsif($type == 9) {
+		parse_elements_section();
 	} elsif($type == 10) {
 		parse_code_section();
 	} else {
