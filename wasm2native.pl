@@ -65,7 +65,7 @@ sub parse_exports_section() {
 	my $nexp = take_num();
 	l "Parsing $nexp export(s)";
 	for (1..$nexp) {
-		say offset();
+		say STDERR offset();
 		my $name = take_name();
 		my $kind = take_byte();
 		my $index = take_num(1);
@@ -90,7 +90,15 @@ my %OPCODE = (
 	# 0x0b => { name => 'end' },
 	# 0x0f => { name => 'return', code => [ 'pop rax', 'ret' ] },
 	0x1a => { name => 'drop', code => [ 'pop rax'] },
-	0x20 => { name => 'local.get \0', args => [ TU32 ], code => [ 'push [r10-%0]' ] },
+	0x20 => { name => 'local.get \0', args => [ TU32 ], code => [ 'push qword [r10-%0]' ] },
+	0x2d => { name => 'i32.load8_u align=\0 offset=\1', args => [ TU32, TU32 ], code => [
+		'pop rsi',
+		'add rsi, \1',
+		'add rsi, memory',
+		'xor rax, rax',
+		'mov al, byte [rsi]',
+		'push rax',
+	]},
 	0x41 => { name => 'i32.const \0', args => [ TI32 ], code => [ 'push \0' ] },
 	0x46 => { name => 'i32.eq', code => [
 		'pop rax',
@@ -108,10 +116,10 @@ my %OPCODE = (
 sub parse_code($findex, $fname, $locals) {
 	my $lblgid = 0;
 	my $blkid = 0;
-	my @frames = ({ type => 'func' });
+	my @frames = ({ type => 'func', rtype => $FTYPE[$findex]{type}{res}[0] });
 	say "\tpush rbp";
 	say "\tmov rbp, rsp";
-	say "\tmod r10, rsp";
+	say "\tmov r10, rsp";
 	# Function call must obey SysV ABI as exported and imported functions use it to communicate
 	# with the outer world
 	my $type = $FTYPE[$findex]{type};
@@ -160,6 +168,12 @@ sub parse_code($findex, $fname, $locals) {
 						say "\tpush rax";
 					}				
 				} else {
+					if(TINT($frame->{rtype})) {
+						say "\tpop rax";
+					}
+					say "\tmov rsp, rbp";
+					say "\tpop rbp";
+					say "\tret";
 					return;
 				}
 			}
@@ -219,7 +233,9 @@ sub parse_code($findex, $fname, $locals) {
 				say "\tpop " . pop(@regs) while @regs;
 			}
 			say "\txor rax, rax";
+			say "\tpush r10";
 			say "\tcall $fname";
+			say "\tpop r10";
 			if($type->{res}->@*) {
 				if(TINT($type->{res}[0])) {
 					say "\tpush rax";
@@ -322,24 +338,6 @@ sub take_limits() {
 sub parse_code_section() {
 	my $nfunc = take_num(1);
 	l "Parsing $nfunc function(s)";
-	say <<EOF
-section .text
-	default rel
-	global main
-	extern printf
-
-main:
-	push rbp
-	call wasm_func_main
-	mov rsi, rax
-	mov rdi, fmt
-	xor rax, rax
-	call printf wrt ..plt
-	pop rbp
-	xor rax, rax
-	ret
-EOF
-;
 	for(my $i = 0; $i < $nfunc; $i++) {
 		my $fname = 'wasm_func_' . ($EXPORT[$i]{name} // $i);
 		say "$fname:";
@@ -354,11 +352,6 @@ EOF
 		l "  Function with body size $size, local(s) [@locals]";
 		parse_code($i, $fname, \@locals);
 	}
-	say <<EOF
-section .data
-	fmt: db "%d", 10, 0
-EOF
-;
 }
 
 sub parse_imports_section() {
@@ -401,16 +394,19 @@ sub parse_table_section() {
 	}
 }
 
+my $MEM;
+
 sub parse_memory_section() {
 	my $nmem = take_num(1);
 	l "Parsing $nmem memori(es)";
 	for(my $i = 0; $i < $nmem; $i++) {
 		my $limits = take_limits();
 		l "  Memory $i: " . np($limits);
+		$MEM = $limits; # Current spec only allow single memory
 	}
 }
 
-sub parse_opcode($op) {
+sub parse_opcode($op, $emit = \&say) {
 	my $opcode = $OPCODE{$op};
 	die "Unsupported opcode $op" unless $opcode;
 	my @args;
@@ -425,12 +421,12 @@ sub parse_opcode($op) {
 	}
 	$_ = $opcode->{name};
 	s/\\(\d)/$args[$1]/xg;
-	say "\t;; $_";
+	$emit->("\t;; $_");
 	my $maxlblid = 0;
 	for ($opcode->{code}->@*) {
 		my $o = $_;
 		$o =~ s/\\(\d)/$args[$1]/xg;
-		say "\t$o";
+		$emit->("\t$o");
 	}
 }
 
@@ -468,6 +464,48 @@ sub parse_elements_section() {
 	}
 }
 
+my @DATASEG;
+
+sub parse_data_section() {
+	my $ndata = take_num(1);
+	l "Parsing $ndata data segment(s)";
+	for(my $i = 0; $i < $ndata; $i++) {
+		my $kind = take_num(1);
+		die "Data segment kind $kind is not supported" unless $kind == 0;
+		my $init = '';
+		my $emit = sub { $init .= "$_[0]\n" };
+		while($CODE) {
+			my $op = take_byte();
+			last if $op == 0x0b;
+			parse_opcode($op, $emit);
+		}
+		my @bytes = take_lparr_byte();
+		my $seg = { init => $init, bytes => \@bytes };
+		push @DATASEG, $seg;
+		l "  Data segment $i: " . np($seg);
+	}
+}
+
+say <<EOF
+section .text
+	default rel
+	global main
+	extern printf
+
+main:
+	push rbp
+	call init_data_segments
+	call wasm_func_main
+	mov rsi, rax
+	mov rdi, fmt
+	xor rax, rax
+	call printf wrt ..plt
+	pop rbp
+	xor rax, rax
+	ret
+EOF
+;
+
 while($CODE) {
 	my $type = take_byte();
 	my $len = take_num(1);
@@ -490,7 +528,45 @@ while($CODE) {
 		parse_elements_section();
 	} elsif($type == 10) {
 		parse_code_section();
+	} elsif($type == 11) {
+		parse_data_section();
 	} else {
 		die "Unsupported section type $type";
 	}
+}
+
+say 'init_data_segments:';
+
+if(@DATASEG) {
+	for my $i (0..$#DATASEG) {
+		my $seg = $DATASEG[$i];
+		say $seg->{init};
+		say "\tpop rdi";
+		say "\tadd rdi, memory";
+		say "\tmov rsi, data_segment_$i";
+		say "\tmov rcx, " . scalar($seg->{bytes}->@*);
+		say "\trep movsb";
+	}
+}
+
+say "\tret";
+
+
+say <<EOF
+section .data
+	fmt: db "%d", 10, 0
+EOF
+;
+
+if(@DATASEG) {
+	for my $i (0..$#DATASEG) {
+		say "\tdata_segment_$i: db " . join(", ", $DATASEG[$i]{bytes}->@*)
+	}
+}
+
+if($MEM) {
+	my $minmem = $MEM->{min} * 65536;
+	say "\talign 16";
+	say "\tmemory: times $minmem db 0";
+	say "\tglobal memory";
 }
