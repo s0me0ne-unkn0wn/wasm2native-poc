@@ -92,16 +92,24 @@ my %OPCODE = (
 	# 0x0f => { name => 'return', code => [ 'pop rax', 'ret' ] },
 	0x1a => { name => 'drop', code => [ 'pop rax'] },
 	0x20 => { name => 'local.get \0', args => [ TU32 ], code => [ 'push qword [r10-%0]' ] },
+	0x21 => { name => 'local.set \0', args => [ TU32 ], code => [ 'pop rax', 'mov [r10-%0], rax' ] },
 	0x22 => { name => 'local.tee \0', args => [ TU32 ], code => [
 		'mov rax, [rsp]',
 		'mov [r10-%0], rax'
 	]},
 	0x23 => { name => 'global.get \0', args => [ TU32 ], code => [ 'push qword [^0]']},
 	0x24 => { name => 'global.set \0', args => [ TU32 ], code => [ 'pop rax', 'mov [^0], rax']},
+	0x28 => { name => 'i32.load align=\0 offset=\1', args => [ TU32, TU32 ], code => [
+		'pop rsi',
+		# 'add rsi, \1',
+		'add rsi, memory + \1',
+		'movsx rax, dword [rsi]',
+		'push rax',
+	]},
 	0x2c => { name => 'i32.load8_s align=\0 offset=\1', args => [ TU32, TU32 ], code => [
 		'pop rsi',
-		'add rsi, \1',
-		'add rsi, memory',
+		# 'add rsi, \1',
+		'add rsi, memory + \1',
 		'movsx rax, byte [rsi]',
 		'push rax',
 	]},
@@ -121,6 +129,15 @@ my %OPCODE = (
 		'jz @1',
 		'mov [rsp], dword 0',
 		'@1',
+	]},
+	0x49 => { name => 'i32.lt_u', code => [
+		'pop rbx',
+		'xor rax, rax',
+		'cmp rbx, [rsp]',
+		'jb @1',
+		'or rax, 1',
+		'@1',
+		'mov [rsp], rax',
 	]},
 	0x6a => { name => 'i32.add', code => [ 'pop rax', 'add [rsp], rax' ] },
 	0x6b => { name => 'i32.sub', code => [ 'pop rax', 'sub [rsp], rax' ] },
@@ -258,8 +275,8 @@ sub parse_code($findex, $fname, $locals) {
 				}
 			}
 		} elsif($op == 0x11) { # call_indirect
-			my $tableidx = take_num(1);
 			my $typeidx = take_num(1);
+			my $tableidx = take_num(1);
 			my $type = $TYPE[$typeidx];
 			say "\t;; call_indirect $tableidx $typeidx: " . np($type->{par}) . " -> " . np($type->{res});
 			say "\tpop rax";
@@ -506,6 +523,20 @@ sub parse_elements_section() {
 			}
 			my @func = take_vec(1);
 			my $elem = { type => 'funcref', init_offset => $init_offset, funcref => \@func, tableidx => 0 };
+			l "  " . np($elem);
+			push @ELEMENTS, $elem;
+		} elsif($initial == 0x02) {
+			my $tableidx = take_num(1);
+			my $init_offset = '';
+			while($CODE) {
+				my $op = take_byte();
+				last if $op == 0x0b;
+				parse_opcode($op, sub { $init_offset .= "$_[0]\n" });
+			}
+			my $kind = take_byte();
+			die "Unsupported element kind $kind" unless $kind == 0;
+			my @func = take_vec(1);
+			my $elem = { type => 'funcref', init_offset => $init_offset, funcref => \@func, tableidx => $tableidx };
 			l "  " . np($elem);
 			push @ELEMENTS, $elem;
 		} else {
