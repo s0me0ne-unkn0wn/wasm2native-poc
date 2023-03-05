@@ -36,7 +36,7 @@ my ($magic, $version) = unpack('a4 l', take(8));
 die "Wrong signature" unless $magic eq "\x00asm";
 l "WASM version $version";
 
-my (@TYPE, @FTYPE, @EXPORT);
+my (@TYPE, @FTYPE, @EXPORT, @GLOBALS);
 my @abi_param_regs = qw(rdi rsi rdx rcx r8 r9);
 
 sub parse_type_section() {
@@ -77,7 +77,8 @@ sub parse_exports_section() {
 		} elsif($kind == 2) {
 			l "    STUB memory export";
 		} elsif($kind == 3) {
-			l "    STUB global export";
+			l "    Global export [$index]: '$name'";
+			$GLOBALS[$index]{name} = $name;
 		} else {
 			die "Unsupported export kind $kind";
 		}
@@ -91,6 +92,7 @@ my %OPCODE = (
 	# 0x0f => { name => 'return', code => [ 'pop rax', 'ret' ] },
 	0x1a => { name => 'drop', code => [ 'pop rax'] },
 	0x20 => { name => 'local.get \0', args => [ TU32 ], code => [ 'push qword [r10-%0]' ] },
+	0x23 => { name => 'global.get \0', args => [ TU32 ], code => [ 'push qword [^0]']},
 	0x2c => { name => 'i32.load8_s align=\0 offset=\1', args => [ TU32, TU32 ], code => [
 		'pop rsi',
 		'add rsi, \1',
@@ -294,6 +296,7 @@ sub parse_code($findex, $fname, $locals) {
 				my $o = $_;
 				$o =~ s/\\(\d)/$args[$1]/xg;
 				$o =~ s/%(\d+)/($args[$1] + 1) * 8/eg;
+				$o =~ s|\^(\d+)|"wasm_global_" . ($GLOBALS[$args[$1]]{name} // $args[$1])|eg;
 				$o =~ s/@(\d+)/
 					my $lblid = $lblgid + $1;
 					$maxlblid = max($lblid, $1);
@@ -470,11 +473,15 @@ sub parse_globals_section() {
 		my $valtype = take_byte();
 		my $mut = take_byte();
 		l "  Global $i type " . ($mut ? "mut " : "") . $valtype;
+		my $init = '';
 		while($CODE) {
 			my $op = take_byte();
 			last if $op == 0x0b;
-			parse_opcode($op);
+			parse_opcode($op, sub { $init .= "$_[0]\n" });
 		}
+		my $global = { type => $valtype, init => $init };
+		die "Global type $valtype is not supported" unless $valtype == TI32;
+		push @GLOBALS, $global;
 	}
 }
 
@@ -532,6 +539,7 @@ section .text
 
 main:
 	push rbp
+	call init_globals
 	call init_data_segments
 	call init_tables
 	call wasm_func_main
@@ -571,6 +579,17 @@ while($CODE) {
 		parse_data_section();
 	} else {
 		die "Unsupported section type $type";
+	}
+}
+
+say 'init_globals:';
+
+if(@GLOBALS) {
+	for my $i (0..$#GLOBALS) {
+		my $global = $GLOBALS[$i];
+		say $global->{init};
+		say "\tpop rax";
+		say "\tmov [wasm_global_" . ($global->{name} // $i) . "], rax";
 	}
 }
 
@@ -616,6 +635,13 @@ section .data
 	fmt: db "%d", 10, 0
 EOF
 ;
+
+if(@GLOBALS) {
+	say "\talign 16";
+	for my $i (0..$#GLOBALS) {
+		say "\twasm_global_" . ($GLOBALS[$i]{name} // $i) . ": dq 0";
+	}
+}
 
 if(@DATASEG) {
 	for my $i (0..$#DATASEG) {
