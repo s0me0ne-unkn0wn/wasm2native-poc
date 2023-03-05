@@ -91,6 +91,13 @@ my %OPCODE = (
 	# 0x0f => { name => 'return', code => [ 'pop rax', 'ret' ] },
 	0x1a => { name => 'drop', code => [ 'pop rax'] },
 	0x20 => { name => 'local.get \0', args => [ TU32 ], code => [ 'push qword [r10-%0]' ] },
+	0x2c => { name => 'i32.load8_s align=\0 offset=\1', args => [ TU32, TU32 ], code => [
+		'pop rsi',
+		'add rsi, \1',
+		'add rsi, memory',
+		'movsx rax, byte [rsi]',
+		'push rax',
+	]},
 	0x2d => { name => 'i32.load8_u align=\0 offset=\1', args => [ TU32, TU32 ], code => [
 		'pop rsi',
 		'add rsi, \1',
@@ -243,6 +250,29 @@ sub parse_code($findex, $fname, $locals) {
 					die "Unsupported return type $type->{res}[0]";
 				}
 			}
+		} elsif($op == 0x11) { # call_indirect
+			my $tableidx = take_num(1);
+			my $typeidx = take_num(1);
+			my $type = $TYPE[$typeidx];
+			say "\t;; call_indirect $tableidx $typeidx: " . np($type->{par}) . " -> " . np($type->{res});
+			say "\tpop rax";
+			say "\tmov rdi, [wasm_table_$tableidx + rax * 8]";
+			if($type->{par}->@*) {
+				die "Number of parameters greater than " . scalar(@abi_param_regs) . " is not supported yet" if $type->{par}->@* > @abi_param_regs;
+				my @regs = @abi_param_regs[0..($type->{par}->@* - 1)];
+				say "\tpop " . pop(@regs) while @regs;
+			}
+			say "\txor rax, rax";
+			say "\tpush r10";
+			say "\tcall rdi";
+			say "\tpop r10";
+			if($type->{res}->@*) {
+				if(TINT($type->{res}[0])) {
+					say "\tpush rax";
+				} else {
+					die "Unsupported return type $type->{res}[0]";
+				}
+			}
 		} elsif(my $opcode = $OPCODE{$op}) {
 			my @args;
 			if($opcode->{args}) {
@@ -383,6 +413,8 @@ sub parse_imports_section() {
 	}
 }
 
+my @TABLES;
+
 sub parse_table_section() {
 	my $ntab = take_num(1);
 	l "Parsing $ntab table(s)";
@@ -391,6 +423,7 @@ sub parse_table_section() {
 		my $limits = take_limits();
 		my $table = { reftype => $reftype, %$limits };
 		l "  Table $i: " . np($table);
+		push @TABLES, $table;
 	}
 }
 
@@ -406,7 +439,7 @@ sub parse_memory_section() {
 	}
 }
 
-sub parse_opcode($op, $emit = \&say) {
+sub parse_opcode($op, $emit = sub { say @_ }) {
 	my $opcode = $OPCODE{$op};
 	die "Unsupported opcode $op" unless $opcode;
 	my @args;
@@ -445,19 +478,24 @@ sub parse_globals_section() {
 	}
 }
 
+my @ELEMENTS;
+
 sub parse_elements_section() {
 	my $nelem = take_num(1);
 	l "Parsing $nelem element segment(s)";
 	for(my $i = 0; $i < $nelem; $i++) {
 		my $initial = take_num(1);
 		if($initial == 0x00) {
+			my $init_offset = '';
 			while($CODE) {
 				my $op = take_byte();
 				last if $op == 0x0b;
-				parse_opcode($op);
+				parse_opcode($op, sub { $init_offset .= "$_[0]\n" });
 			}
 			my @func = take_vec(1);
-			l "  References functions " . np(@func);
+			my $elem = { type => 'funcref', init_offset => $init_offset, funcref => \@func, tableidx => 0 };
+			l "  " . np($elem);
+			push @ELEMENTS, $elem;
 		} else {
 			die "Unsupported element segment initial $initial";
 		}
@@ -495,6 +533,7 @@ section .text
 main:
 	push rbp
 	call init_data_segments
+	call init_tables
 	call wasm_func_main
 	mov rsi, rax
 	mov rdi, fmt
@@ -551,6 +590,26 @@ if(@DATASEG) {
 
 say "\tret";
 
+say 'init_tables:';
+
+if(@ELEMENTS) {
+	for my $i (0..$#ELEMENTS) {
+		my $elem = $ELEMENTS[$i];
+		if($elem->{type} eq 'funcref') {
+			say $elem->{init_offset};
+			say "\tpop rax";
+			say "\tcld";
+			say "\tlea rdi, [wasm_table_$elem->{tableidx} + rax * 8]";
+			for my $ref ($elem->{funcref}->@*) {
+				say "\tlea rax, [wasm_func_" . ($EXPORT[$ref]{name} // $ref) . ']';
+				say "\tstosq";
+			}
+		}
+	}
+}
+
+say "\tret";
+
 
 say <<EOF
 section .data
@@ -561,6 +620,15 @@ EOF
 if(@DATASEG) {
 	for my $i (0..$#DATASEG) {
 		say "\tdata_segment_$i: db " . join(", ", $DATASEG[$i]{bytes}->@*)
+	}
+}
+
+if(@TABLES) {
+	for my $ti (0..$#TABLES) {
+		my $table = $TABLES[$ti];
+		my $mintable = $table->{min};
+		say "\talign 16";
+		say "\twasm_table_$ti: times $mintable dq 0"; # FIXME: Only funcref tables are implemented!
 	}
 }
 
