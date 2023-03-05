@@ -92,7 +92,12 @@ my %OPCODE = (
 	# 0x0f => { name => 'return', code => [ 'pop rax', 'ret' ] },
 	0x1a => { name => 'drop', code => [ 'pop rax'] },
 	0x20 => { name => 'local.get \0', args => [ TU32 ], code => [ 'push qword [r10-%0]' ] },
+	0x22 => { name => 'local.tee \0', args => [ TU32 ], code => [
+		'mov rax, [rsp]',
+		'mov [r10-%0], rax'
+	]},
 	0x23 => { name => 'global.get \0', args => [ TU32 ], code => [ 'push qword [^0]']},
+	0x24 => { name => 'global.set \0', args => [ TU32 ], code => [ 'pop rax', 'mov [^0], rax']},
 	0x2c => { name => 'i32.load8_s align=\0 offset=\1', args => [ TU32, TU32 ], code => [
 		'pop rsi',
 		'add rsi, \1',
