@@ -88,9 +88,15 @@ sub parse_exports_section() {
 my %OPCODE = (
 	0x00 => { name => 'unreachable', code => [ 'ud2' ] },
 	0x01 => { name => 'nop', code => [ 'nop' ] },
-	# 0x0b => { name => 'end' },
-	# 0x0f => { name => 'return', code => [ 'pop rax', 'ret' ] },
-	0x1a => { name => 'drop', code => [ 'pop rax'] },
+	0x1a => { name => 'drop', code => [ 'add rsp, 8'] },
+	0x1b => { name => 'select', code => [
+		'pop rcx',
+		'pop rax',
+		'pop rbx',
+		'test ecx, ecx',
+		'cmovnz rax, rbx',
+		'push rax',
+	]},
 	0x20 => { name => 'local.get \0', args => [ TU32 ], code => [ 'push qword [r10-%0]' ] },
 	0x21 => { name => 'local.set \0', args => [ TU32 ], code => [ 'pop rax', 'mov [r10-%0], rax' ] },
 	0x22 => { name => 'local.tee \0', args => [ TU32 ], code => [
@@ -101,46 +107,134 @@ my %OPCODE = (
 	0x24 => { name => 'global.set \0', args => [ TU32 ], code => [ 'pop rax', 'mov [^0], rax']},
 	0x28 => { name => 'i32.load align=\0 offset=\1', args => [ TU32, TU32 ], code => [
 		'pop rsi',
-		# 'add rsi, \1',
 		'add rsi, memory + \1',
 		'movsx rax, dword [rsi]',
 		'push rax',
 	]},
+	0x29 => { name => 'i64.load align=\0 offset=\1', args => [ TU32, TU32 ], code => [
+		'pop rsi',
+		'add rsi, memory + \1',
+		'movsx rax, qword [rsi]',
+		'push rax',
+	]},
 	0x2c => { name => 'i32.load8_s align=\0 offset=\1', args => [ TU32, TU32 ], code => [
 		'pop rsi',
-		# 'add rsi, \1',
 		'add rsi, memory + \1',
 		'movsx rax, byte [rsi]',
 		'push rax',
 	]},
 	0x2d => { name => 'i32.load8_u align=\0 offset=\1', args => [ TU32, TU32 ], code => [
 		'pop rsi',
-		'add rsi, \1',
-		'add rsi, memory',
-		'xor rax, rax',
-		'mov al, byte [rsi]',
+		'add rsi, memory + \1',
+		# 'xor rax, rax',
+		'movzx rax, byte [rsi]',
 		'push rax',
 	]},
-	0x41 => { name => 'i32.const \0', args => [ TI32 ], code => [ 'push \0' ] },
-	0x46 => { name => 'i32.eq', code => [
+	0x36 => { name => 'i32.store align=\0 offset=\1', args => [ TU32, TU32 ], code => [
 		'pop rax',
-		'xor [rsp], rax',
-		'mov [rsp], dword 1',
-		'jz @1',
-		'mov [rsp], dword 0',
-		'@1',
+		'pop rdi',
+		'add rdi, memory + \1',
+		'mov dword [rdi], eax',
+	]},
+	0x37 => { name => 'i64.store align=\0 offset=\1', args => [ TU32, TU32 ], code => [
+		'pop rax',
+		'pop rdi',
+		'add rdi, memory + \1',
+		'mov qword [rdi], rax',
+	]},
+	0x3a => { name => 'i32.store8 align=\0 offset=\1', args => [ TU32, TU32 ], code => [
+		'pop rax',
+		'pop rdi',
+		'add rdi, memory + \1',
+		'mov byte [rdi], al',
+	]},
+	0x41 => { name => 'i32.const \0', args => [ TI32 ], code => [ 'push \0' ] },
+	0x42 => { name => 'i64.const \0', args => [ TI32 ], code => [ 'push \0' ] },
+	0x45 => { name => 'i32.eqz', code => [
+		'pop rax',
+		'test eax, eax',
+		'sete al',
+		'movzx rax, al', # FIXME: Is it safe to omit REX.W here and below?
+		'push rax',
+	]},
+	0x46 => { name => 'i32.eq', code => [
+		'pop rbx',
+		'pop rax',
+		'cmp eax, ebx',
+		'sete al',
+		'movzx rax, al',
+		'push rax',
+	]},
+	0x47 => { name => 'i32.ne', code => [
+		'pop rbx',
+		'pop rax',
+		'cmp eax, ebx',
+		'setne al',
+		'movzx rax, al',
+		'push rax',
+	]},
+	0x48 => { name => 'i32.lt_s', code => [
+		'pop rbx',
+		'pop rax',
+		'cmp eax, ebx',
+		'setl al',
+		'movzx rax, al',
+		'push rax',
 	]},
 	0x49 => { name => 'i32.lt_u', code => [
 		'pop rbx',
-		'xor rax, rax',
-		'cmp rbx, [rsp]',
-		'jb @1',
-		'or rax, 1',
-		'@1',
-		'mov [rsp], rax',
+		'pop rax',
+		'cmp eax, ebx',
+		'setb al',
+		'movzx rax, al',
+		'push rax',
+	]},
+	0x4b => { name => 'i32.gt_u', code => [
+		'pop rbx',
+		'pop rax',
+		'cmp rax, rbx',
+		'seta al',
+		'movzx rax, al',
+		'push rax',
+	]},
+	0x4f => { name => 'i32.ge_u', code => [
+		'pop rbx',
+		'pop rax',
+		'cmp rax, rbx',
+		'setae al',
+		'movzx rax, al',
+		'push rax',
+	]},
+	0x51 => { name => 'i64.eq', code => [
+		'pop rbx',
+		'pop rax',
+		'cmp rax, rbx',
+		'sete al',
+		'movzx rax, al',
+		'push rax',
+	]},
+	0x58 => { name => 'i64.le_u', code => [
+		'pop rbx',
+		'pop rax',
+		'cmp rax, rbx',
+		'setbe al',
+		'movzx rax, al',
+		'push rax',
 	]},
 	0x6a => { name => 'i32.add', code => [ 'pop rax', 'add [rsp], rax' ] },
 	0x6b => { name => 'i32.sub', code => [ 'pop rax', 'sub [rsp], rax' ] },
+	0x71 => { name => 'i32.and', code => [ 'pop rax', 'and [rsp], rax' ] },
+	0x72 => { name => 'i32.or', code => [ 'pop rax', 'or [rsp], rax' ] },
+	0x73 => { name => 'i32.xor', code => [ 'pop rax', 'xor [rsp], rax' ] },
+	0x74 => { name => 'i32.shl', code => [ 'pop rcx', 'pop rax', 'shl eax, cl', 'push rax' ] },
+	0x76 => { name => 'i32.shr_u', code => [ 'pop rcx', 'pop rax', 'shr eax, cl', 'push rax' ] },
+	0x7f => { name => 'i64.div_s', code => [
+		'pop rbx',
+		'pop rax',
+		'cqo',
+		'idiv rbx',
+		'push rax',
+	]},
 );
 
 
@@ -628,6 +722,8 @@ if(@GLOBALS) {
 		say "\tmov [wasm_global_" . ($global->{name} // $i) . "], rax";
 	}
 }
+
+say "\tret";
 
 say 'init_data_segments:';
 
