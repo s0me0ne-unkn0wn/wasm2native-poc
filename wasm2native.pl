@@ -2,7 +2,7 @@
 
 use v5.30.0;
 use File::Slurp;
-use List::Util qw(sum max any);
+use List::Util qw(sum max min any);
 use DDP multiline => 0;
 use feature qw(signatures);
 use bytes;
@@ -97,12 +97,9 @@ my %OPCODE = (
 		'cmovnz rax, rbx',
 		'push rax',
 	]},
-	0x20 => { name => 'local.get \0', args => [ TU32 ], code => [ 'push qword [r10-%0]' ] },
-	0x21 => { name => 'local.set \0', args => [ TU32 ], code => [ 'pop rax', 'mov [r10-%0], rax' ] },
-	0x22 => { name => 'local.tee \0', args => [ TU32 ], code => [
-		'mov rax, [rsp]',
-		'mov [r10-%0], rax'
-	]},
+	0x20 => { name => 'local.get \0', args => [ TU32 ], code => [ 'push qword [%0]' ] },
+	0x21 => { name => 'local.set \0', args => [ TU32 ], code => [ 'pop rax', 'mov [%0], rax' ] },
+	0x22 => { name => 'local.tee \0', args => [ TU32 ], code => [ 'mov rax, [rsp]',	'mov [%0], rax'	]},
 	0x23 => { name => 'global.get \0', args => [ TU32 ], code => [ 'push qword [^0]']},
 	0x24 => { name => 'global.set \0', args => [ TU32 ], code => [ 'pop rax', 'mov [^0], rax']},
 	0x28 => { name => 'i32.load align=\0 offset=\1', args => [ TU32, TU32 ], code => [
@@ -126,8 +123,13 @@ my %OPCODE = (
 	0x2d => { name => 'i32.load8_u align=\0 offset=\1', args => [ TU32, TU32 ], code => [
 		'pop rsi',
 		'add rsi, memory + \1',
-		# 'xor rax, rax',
 		'movzx rax, byte [rsi]',
+		'push rax',
+	]},
+	0x35 => { name => 'i64.load32_u align=\0 offset=\1', args => [ TU32, TU32 ], code => [
+		'pop rsi',
+		'add rsi, memory + \1',
+		'movzx rax, dword [rsi]',
 		'push rax',
 	]},
 	0x36 => { name => 'i32.store align=\0 offset=\1', args => [ TU32, TU32 ], code => [
@@ -197,6 +199,14 @@ my %OPCODE = (
 		'movzx rax, al',
 		'push rax',
 	]},
+	0x4c => { name => 'i32.le_s', code => [
+		'pop rbx',
+		'pop rax',
+		'cmp eax, ebx',
+		'setle al',
+		'movzx rax, al',
+		'push rax',
+	]},
 	0x4f => { name => 'i32.ge_u', code => [
 		'pop rbx',
 		'pop rax',
@@ -210,6 +220,14 @@ my %OPCODE = (
 		'pop rax',
 		'cmp rax, rbx',
 		'sete al',
+		'movzx rax, al',
+		'push rax',
+	]},
+	0x52 => { name => 'i64.ne', code => [
+		'pop rbx',
+		'pop rax',
+		'cmp rax, rbx',
+		'setne al',
 		'movzx rax, al',
 		'push rax',
 	]},
@@ -237,30 +255,92 @@ my %OPCODE = (
 	]},
 );
 
-
 sub parse_code($findex, $fname, $locals) {
+	sub gen_call($type, $dest) {
+		# FIXME: It's obviously possible to overwrite the WASM arguments frame with the ABI frame
+		# contents before the call and not to spend excessive stack space; It's just KISS for now
+		my $nreg_params = min(scalar $type->{par}->@*, scalar @abi_param_regs);
+		my $nstack_params = max(0, $type->{par}->@* - @abi_param_regs);
+		# [rsp] -> last argument
+		say "\tpush r10";
+		if($type->{par}->@*) {
+			my $argoffset = 8; # [rsp+8] -> last argument
+			if($nstack_params) {
+				for(1..$nstack_params) {
+					say "\tpush qword [rsp+$argoffset]"; # [rsp+16] -> last argument; [rsp+24] -> next argument
+					$argoffset += 16
+				}
+			}
+			my @regs = @abi_param_regs[0..($nreg_params - 1)];
+			while(my $reg = pop @regs) {
+				say "\tmov $reg, [rsp+$argoffset]";
+				$argoffset += 8;
+			}
+		}
+
+		say "\txor rax, rax";
+		say "\tcall $dest";
+
+		say "\tadd rsp, " . ($nstack_params * 8) if $nstack_params; # Discard ABI call frame, if any
+		say "\tpop r10";
+		say "\tadd rsp, " . ($type->{par}->@* * 8) if $type->{par}->@*; # Discard WASM argument frame, if any
+
+		if($type->{res}->@*) {
+			if(TINT($type->{res}[0])) {
+				say "\tpush rax";
+			} else {
+				die "Unsupported return type $type->{res}[0]";
+			}
+		}
+	}
 	my $lblgid = 0;
 	my $blkid = 0;
 	my @frames = ({ type => 'func', rtype => $FTYPE[$findex]{type}{res}[0] });
 	say "\tpush rbp";
-	say "\tmov rbp, rsp";
-	say "\tmov r10, rsp";
+	say "\tmov rbp, rsp"; # Block frame
+	say "\tmov r10, rsp"; # Function frame
 	# Function call must obey SysV ABI as exported and imported functions use it to communicate
 	# with the outer world
 	my $type = $FTYPE[$findex]{type};
 	l "Type: " . np($type);
-	die "Number of parameters greater than " . scalar(@abi_param_regs) . " is not supported yet" if $type->{par}->@* > @abi_param_regs;
+	# die "Number of parameters greater than " . scalar(@abi_param_regs) . " is not supported yet" if $type->{par}->@* > @abi_param_regs;
 
 	my @localmap;
-	if(my $fullnlocals = $type->{par}->@* + @$locals) {
-		say "\tsub rsp, " . ($fullnlocals * 8);
 
-		my @regs = @abi_param_regs;
-		for (1..scalar($type->{par}->@*)) {
-			my $addr = 8 * $_;
-			say "\tmov [r10-$addr], " . shift(@regs);
-			$localmap[$_ - 1] = $addr;
-		}
+	my $nreg_params = min(scalar $type->{par}->@*, scalar @abi_param_regs);
+	my $nstack_params = max(0, $type->{par}->@* - @abi_param_regs);
+	my $nlocals = scalar @$locals;
+
+	my $frame_offset = 8;
+	my $caller_offset = 16;
+	my $localidx = 0;
+
+	if(my $fullnlocals = $nreg_params + $nstack_params + $nlocals) {
+		say "\tsub rsp, " . ($fullnlocals * 8);
+	}
+
+	# Load register params
+	my @regs = @abi_param_regs;
+	for (1..$nreg_params) {
+		say "\tmov [rbp-$frame_offset], " . shift(@regs);
+		$localmap[$localidx++] = "r10-$frame_offset";
+		$frame_offset += 8;
+	}
+
+	# Load stack params. They could have been left on caller's frame as it doesn't expect them to
+	# persist anyway, but that would ruin stack usage determinism across platforms
+	for (1..$nstack_params) {
+		say "\tmov rax, [rbp+$caller_offset]";
+		say "\tmov [rbp-$frame_offset], rax";
+		$localmap[$localidx++] = "r10-$frame_offset";
+		$frame_offset += 8;
+		$caller_offset += 8;
+	}
+
+	# Reserve locals
+	for (1..$nlocals) {
+		$localmap[$localidx++] = "r10-$frame_offset";
+		$frame_offset += 8;
 	}
 
 	while($CODE) {
@@ -301,6 +381,8 @@ sub parse_code($findex, $fname, $locals) {
 					say "\tret";
 					return;
 				}
+			} else {
+				die "No control stack frames";
 			}
 		} elsif($op == 0x0c) { # br
 			my $target = take_num(1);
@@ -338,13 +420,47 @@ sub parse_code($findex, $fname, $locals) {
 			say "\tjmp .${fname}_label_block_$tframe->{id}_branch_target";
 
 			say ".${fname}_label_br_else_$lblid:"
+		} elsif($op == 0x0e) { # br_table
+			my @brtable = take_vec(1);
+			my $default_target = take_num(1);
+			push @brtable, $default_target;
+			my $default_frame = $frames[$default_target];
+			say "\t;; br_table " . np(@brtable) . " $default_target";
+			my $lblid = $lblgid++;
+			say "\tpop rcx"; # Jump target index
+			say "\tmov rbx, $#brtable"; # The last element is the default one
+			say "\tcmp rcx, rbx"; 
+			say "\tcmova rcx, rbx"; # Use default index if overflowed
+
+			if(TINT($default_frame->{rtype})) { # All the branch targets share the same type
+				say "\tpop rax";
+			}
+
+			say "\tlea rcx, [.br_table_$lblid + rcx * 8]";
+			say "\tjmp [rcx]";
+
+			my $target = max @brtable;
+			while($target >= 0) {
+				my $bframe = $frames[$target];
+				say ".br_table_${lblid}_exit_$target:";
+				for (0..($target - 1)) {
+					say "\tmov rsp, rbp";
+					say "\tpop rbp";
+				}
+				say "\tjmp .${fname}_label_block_$bframe->{id}_branch_target";
+				--$target;
+			}
+
+			say ".br_table_$lblid:";
+			for (@brtable) {
+				say "\tdq .br_table_${lblid}_exit_$_";
+			}
 		} elsif($op == 0x0f) { # return
 			say "\t;; return";
 			say "\tpop rax";
-			while(@frames) {
+			for(@frames) {
 				say "\tmov rsp, rbp";
 				say "\tpop rbp";
-				shift @frames;
 			}
 			say "\tret";
 		} elsif($op == 0x10) { # call
@@ -352,22 +468,7 @@ sub parse_code($findex, $fname, $locals) {
 			my $type = $FTYPE[$func]{type};
 			my $fname = 'wasm_func_' . ($EXPORT[$func]{name} // $func);
 			say "\t;; call $func ($fname): " . np($type->{par}) . " -> " . np($type->{res});
-			if($type->{par}->@*) {
-				die "Number of parameters greater than " . scalar(@abi_param_regs) . " is not supported yet" if $type->{par}->@* > @abi_param_regs;
-				my @regs = @abi_param_regs[0..($type->{par}->@* - 1)];
-				say "\tpop " . pop(@regs) while @regs;
-			}
-			say "\txor rax, rax";
-			say "\tpush r10";
-			say "\tcall $fname";
-			say "\tpop r10";
-			if($type->{res}->@*) {
-				if(TINT($type->{res}[0])) {
-					say "\tpush rax";
-				} else {
-					die "Unsupported return type $type->{res}[0]";
-				}
-			}
+			gen_call($type, $fname);
 		} elsif($op == 0x11) { # call_indirect
 			my $typeidx = take_num(1);
 			my $tableidx = take_num(1);
@@ -375,22 +476,7 @@ sub parse_code($findex, $fname, $locals) {
 			say "\t;; call_indirect $tableidx $typeidx: " . np($type->{par}) . " -> " . np($type->{res});
 			say "\tpop rax";
 			say "\tmov rdi, [wasm_table_$tableidx + rax * 8]";
-			if($type->{par}->@*) {
-				die "Number of parameters greater than " . scalar(@abi_param_regs) . " is not supported yet" if $type->{par}->@* > @abi_param_regs;
-				my @regs = @abi_param_regs[0..($type->{par}->@* - 1)];
-				say "\tpop " . pop(@regs) while @regs;
-			}
-			say "\txor rax, rax";
-			say "\tpush r10";
-			say "\tcall rdi";
-			say "\tpop r10";
-			if($type->{res}->@*) {
-				if(TINT($type->{res}[0])) {
-					say "\tpush rax";
-				} else {
-					die "Unsupported return type $type->{res}[0]";
-				}
-			}
+			gen_call($type, 'rdi');
 		} elsif(my $opcode = $OPCODE{$op}) {
 			my @args;
 			if($opcode->{args}) {
@@ -411,7 +497,7 @@ sub parse_code($findex, $fname, $locals) {
 			for ($opcode->{code}->@*) {
 				my $o = $_;
 				$o =~ s/\\(\d)/$args[$1]/xg;
-				$o =~ s/%(\d+)/($args[$1] + 1) * 8/eg;
+				$o =~ s/%(\d+)/$localmap[$args[$1]]/xg;
 				$o =~ s|\^(\d+)|"wasm_global_" . ($GLOBALS[$args[$1]]{name} // $args[$1])|eg;
 				$o =~ s/@(\d+)/
 					my $lblid = $lblgid + $1;
