@@ -32,6 +32,19 @@ sub take($len) {
 	$chunk;
 }
 
+my %argtype = (
+	0x7f, 'i32',
+	0x7e, 'i64',
+	0x7d, 'f32',
+	0x7c, 'f64',
+);
+
+sub arglist {
+	my @r;
+	push @r, $argtype{$_} while $_ = shift;
+	'[ ' . join(', ', @r) . ' ]';
+}
+
 my ($magic, $version) = unpack('a4 l', take(8));
 die "Wrong signature" unless $magic eq "\x00asm";
 l "WASM version $version";
@@ -85,6 +98,37 @@ sub parse_exports_section() {
 	}
 }
 
+sub op_mem_load($ext, $width) {
+	[
+		'pop rsi',
+		'add rsi, memory + \1',
+		"mov$ext rax, $width [rsi]",
+		'push rax',
+	]
+}
+
+my %op_mem_store_regs = (byte => 'al', word => 'ax', dword => 'eax', qword => 'rax');
+
+sub op_mem_store($width) {
+	[
+		'pop rax',
+		'pop rdi',
+		'add rdi, memory + \1',
+		"mov $width [rdi], $op_mem_store_regs{$width}",
+	]	
+}
+
+sub op_cmp($cond, $width) {
+	[
+		'pop rbx',
+		'pop rax',
+		"cmp ${width}ax, ${width}bx",
+		"set$cond al",
+		'movzx rax, al',
+		'push rax',
+	]
+}
+
 my %OPCODE = (
 	0x00 => { name => 'unreachable', code => [ 'ud2' ] },
 	0x01 => { name => 'nop', code => [ 'nop' ] },
@@ -102,54 +146,17 @@ my %OPCODE = (
 	0x22 => { name => 'local.tee \0', args => [ TU32 ], code => [ 'mov rax, [rsp]',	'mov [%0], rax'	]},
 	0x23 => { name => 'global.get \0', args => [ TU32 ], code => [ 'push qword [^0]']},
 	0x24 => { name => 'global.set \0', args => [ TU32 ], code => [ 'pop rax', 'mov [^0], rax']},
-	0x28 => { name => 'i32.load align=\0 offset=\1', args => [ TU32, TU32 ], code => [
-		'pop rsi',
-		'add rsi, memory + \1',
-		'movsx rax, dword [rsi]',
-		'push rax',
-	]},
-	0x29 => { name => 'i64.load align=\0 offset=\1', args => [ TU32, TU32 ], code => [
-		'pop rsi',
-		'add rsi, memory + \1',
-		'movsx rax, qword [rsi]',
-		'push rax',
-	]},
-	0x2c => { name => 'i32.load8_s align=\0 offset=\1', args => [ TU32, TU32 ], code => [
-		'pop rsi',
-		'add rsi, memory + \1',
-		'movsx rax, byte [rsi]',
-		'push rax',
-	]},
-	0x2d => { name => 'i32.load8_u align=\0 offset=\1', args => [ TU32, TU32 ], code => [
-		'pop rsi',
-		'add rsi, memory + \1',
-		'movzx rax, byte [rsi]',
-		'push rax',
-	]},
-	0x35 => { name => 'i64.load32_u align=\0 offset=\1', args => [ TU32, TU32 ], code => [
-		'pop rsi',
-		'add rsi, memory + \1',
-		'movzx rax, dword [rsi]',
-		'push rax',
-	]},
-	0x36 => { name => 'i32.store align=\0 offset=\1', args => [ TU32, TU32 ], code => [
-		'pop rax',
-		'pop rdi',
-		'add rdi, memory + \1',
-		'mov dword [rdi], eax',
-	]},
-	0x37 => { name => 'i64.store align=\0 offset=\1', args => [ TU32, TU32 ], code => [
-		'pop rax',
-		'pop rdi',
-		'add rdi, memory + \1',
-		'mov qword [rdi], rax',
-	]},
-	0x3a => { name => 'i32.store8 align=\0 offset=\1', args => [ TU32, TU32 ], code => [
-		'pop rax',
-		'pop rdi',
-		'add rdi, memory + \1',
-		'mov byte [rdi], al',
-	]},
+	0x28 => { name => 'i32.load align=\0 offset=\1', args => [ TU32, TU32 ], code => op_mem_load('sx', 'dword') },
+	0x29 => { name => 'i64.load align=\0 offset=\1', args => [ TU32, TU32 ], code => op_mem_load('', 'qword') },
+	0x2c => { name => 'i32.load8_s align=\0 offset=\1', args => [ TU32, TU32 ], code => op_mem_load('sx', 'byte') },
+	0x2d => { name => 'i32.load8_u align=\0 offset=\1', args => [ TU32, TU32 ], code => op_mem_load('zx', 'byte') },
+	0x2f => { name => 'i32.load16_u align=\0 offset=\1', args => [ TU32, TU32 ], code => op_mem_load('zx', 'word') },
+	0x31 => { name => 'i64.load8_u align=\0 offset=\1', args => [ TU32, TU32 ], code => op_mem_load('zx', 'byte') },
+	0x35 => { name => 'i64.load32_u align=\0 offset=\1', args => [ TU32, TU32 ], code => op_mem_load('zx', 'dword') },
+	0x36 => { name => 'i32.store align=\0 offset=\1', args => [ TU32, TU32 ], code => op_mem_store('dword') },
+	0x37 => { name => 'i64.store align=\0 offset=\1', args => [ TU32, TU32 ], code => op_mem_store('qword') },
+	0x3a => { name => 'i32.store8 align=\0 offset=\1', args => [ TU32, TU32 ], code => op_mem_store('byte') },
+	0x3b => { name => 'i32.store16 align=\0 offset=\1', args => [ TU32, TU32 ], code => op_mem_store('word') },
 	0x41 => { name => 'i32.const \0', args => [ TI32 ], code => [ 'push \0' ] },
 	0x42 => { name => 'i64.const \0', args => [ TI32 ], code => [ 'push \0' ] },
 	0x45 => { name => 'i32.eqz', code => [
@@ -159,93 +166,47 @@ my %OPCODE = (
 		'movzx rax, al', # FIXME: Is it safe to omit REX.W here and below?
 		'push rax',
 	]},
-	0x46 => { name => 'i32.eq', code => [
-		'pop rbx',
+	0x46 => { name => 'i32.eq', code => op_cmp('e', 'e') },
+	0x47 => { name => 'i32.ne', code => op_cmp('ne', 'e') },
+	0x48 => { name => 'i32.lt_s', code => op_cmp('l', 'e') },
+	0x49 => { name => 'i32.lt_u', code => op_cmp('b', 'e') },
+	0x4a => { name => 'i32.gt_s', code => op_cmp('g', 'e') },
+	0x4b => { name => 'i32.gt_u', code => op_cmp('a', 'e') },
+	0x4c => { name => 'i32.le_s', code => op_cmp('le', 'e') },
+	0x4d => { name => 'i32.le_u', code => op_cmp('be', 'e') },
+	0x4f => { name => 'i32.ge_u', code => op_cmp('ae', 'e') },
+	0x50 => { name => 'i64.eqz', code => [
 		'pop rax',
-		'cmp eax, ebx',
+		'test rax, rax',
 		'sete al',
 		'movzx rax, al',
 		'push rax',
 	]},
-	0x47 => { name => 'i32.ne', code => [
-		'pop rbx',
-		'pop rax',
-		'cmp eax, ebx',
-		'setne al',
-		'movzx rax, al',
-		'push rax',
-	]},
-	0x48 => { name => 'i32.lt_s', code => [
-		'pop rbx',
-		'pop rax',
-		'cmp eax, ebx',
-		'setl al',
-		'movzx rax, al',
-		'push rax',
-	]},
-	0x49 => { name => 'i32.lt_u', code => [
-		'pop rbx',
-		'pop rax',
-		'cmp eax, ebx',
-		'setb al',
-		'movzx rax, al',
-		'push rax',
-	]},
-	0x4b => { name => 'i32.gt_u', code => [
-		'pop rbx',
-		'pop rax',
-		'cmp rax, rbx',
-		'seta al',
-		'movzx rax, al',
-		'push rax',
-	]},
-	0x4c => { name => 'i32.le_s', code => [
-		'pop rbx',
-		'pop rax',
-		'cmp eax, ebx',
-		'setle al',
-		'movzx rax, al',
-		'push rax',
-	]},
-	0x4f => { name => 'i32.ge_u', code => [
-		'pop rbx',
-		'pop rax',
-		'cmp rax, rbx',
-		'setae al',
-		'movzx rax, al',
-		'push rax',
-	]},
-	0x51 => { name => 'i64.eq', code => [
-		'pop rbx',
-		'pop rax',
-		'cmp rax, rbx',
-		'sete al',
-		'movzx rax, al',
-		'push rax',
-	]},
-	0x52 => { name => 'i64.ne', code => [
-		'pop rbx',
-		'pop rax',
-		'cmp rax, rbx',
-		'setne al',
-		'movzx rax, al',
-		'push rax',
-	]},
-	0x58 => { name => 'i64.le_u', code => [
-		'pop rbx',
-		'pop rax',
-		'cmp rax, rbx',
-		'setbe al',
-		'movzx rax, al',
-		'push rax',
-	]},
+	0x51 => { name => 'i64.eq', code => op_cmp('e', 'r') },
+	0x52 => { name => 'i64.ne', code => op_cmp('ne', 'r') },
+	0x56 => { name => 'i64.gt_u', code => op_cmp('a', 'r') },
+	0x58 => { name => 'i64.le_u', code => op_cmp('be', 'r') },
+	0x5a => { name => 'i64.ge_u', code => op_cmp('ae', 'r') },
+	0x67 => { name => 'i32.clz', code => [ 'pop rax', 'lzcnt eax, eax', 'push rax' ]},
+	0x68 => { name => 'i32.ctz', code => [ 'pop rax', 'tzcnt eax, eax', 'push rax' ]},
 	0x6a => { name => 'i32.add', code => [ 'pop rax', 'add [rsp], rax' ] },
 	0x6b => { name => 'i32.sub', code => [ 'pop rax', 'sub [rsp], rax' ] },
+	0x6c => { name => 'i32.mul', code => [ 'pop rax', 'pop rbx', 'imul ebx', 'push rax' ] },
+	0x6e => { name => 'i32.div_u', code => [
+		'pop rbx',
+		'pop rax',
+		'cdq',
+		'div ebx',
+		'push rax',
+	]},
 	0x71 => { name => 'i32.and', code => [ 'pop rax', 'and [rsp], rax' ] },
 	0x72 => { name => 'i32.or', code => [ 'pop rax', 'or [rsp], rax' ] },
 	0x73 => { name => 'i32.xor', code => [ 'pop rax', 'xor [rsp], rax' ] },
 	0x74 => { name => 'i32.shl', code => [ 'pop rcx', 'pop rax', 'shl eax, cl', 'push rax' ] },
 	0x76 => { name => 'i32.shr_u', code => [ 'pop rcx', 'pop rax', 'shr eax, cl', 'push rax' ] },
+	0x77 => { name => 'i32.rotl', code => [ 'pop rcx', 'pop rax', 'rol eax, cl', 'push rax' ] },
+	0x7c => { name => 'i64.add', code => [ 'pop rax', 'add [rsp], rax' ] },
+	0x7e => { name => 'i64.mul', code => [ 'pop rax', 'pop rbx', 'imul rbx', 'push rax' ] },
 	0x7f => { name => 'i64.div_s', code => [
 		'pop rbx',
 		'pop rax',
@@ -253,6 +214,17 @@ my %OPCODE = (
 		'idiv rbx',
 		'push rax',
 	]},
+	0x80 => { name => 'i64.div_u', code => [
+		'pop rbx',
+		'pop rax',
+		'cqo',
+		'div rbx',
+		'push rax',
+	]},
+	0x84 => { name => 'i64.or', code => [ 'pop rax', 'or [rsp], rax' ] },
+	0x86 => { name => 'i64.shl', code => [ 'pop rcx', 'pop rax', 'shl rax, cl', 'push rax' ] },
+	0xa7 => { name => 'i32.wrap_i64', code => [ 'pop rax', 'movzx rax, eax', 'push rax' ]},
+	0xad => { name => 'i64.extend_i32_u', code => [ 'pop rax', 'movzx rax, eax', 'push rax' ]},
 );
 
 sub parse_code($findex, $fname, $locals) {
@@ -302,7 +274,7 @@ sub parse_code($findex, $fname, $locals) {
 	# Function call must obey SysV ABI as exported and imported functions use it to communicate
 	# with the outer world
 	my $type = $FTYPE[$findex]{type};
-	l "Type: " . np($type);
+	l "Type: " . arglist($type->{par}->@*) . ' -> ' . arglist($type->{res}->@*);
 	# die "Number of parameters greater than " . scalar(@abi_param_regs) . " is not supported yet" if $type->{par}->@* > @abi_param_regs;
 
 	my @localmap;
@@ -467,13 +439,13 @@ sub parse_code($findex, $fname, $locals) {
 			my $func = take_num(1);
 			my $type = $FTYPE[$func]{type};
 			my $fname = 'wasm_func_' . ($EXPORT[$func]{name} // $func);
-			say "\t;; call $func ($fname): " . np($type->{par}) . " -> " . np($type->{res});
+			say "\t;; call $func ($fname): " . arglist($type->{par}->@*) . " -> " . arglist($type->{res}->@*);
 			gen_call($type, $fname);
 		} elsif($op == 0x11) { # call_indirect
 			my $typeidx = take_num(1);
 			my $tableidx = take_num(1);
 			my $type = $TYPE[$typeidx];
-			say "\t;; call_indirect $tableidx $typeidx: " . np($type->{par}) . " -> " . np($type->{res});
+			say "\t;; call_indirect $tableidx $typeidx: " . arglist($type->{par}->@*) . " -> " . arglist($type->{res}->@*);
 			say "\tpop rax";
 			say "\tmov rdi, [wasm_table_$tableidx + rax * 8]";
 			gen_call($type, 'rdi');
@@ -508,7 +480,7 @@ sub parse_code($findex, $fname, $locals) {
 			}
 			$lblgid += $maxlblid;
 		} else {
-			die "Unsupported opcode $op";
+			die "Unsupported opcode " . sprintf('0x%02X', $op);
 		}
 	}
 }
@@ -576,15 +548,15 @@ sub parse_code_section() {
 	for(my $i = 0; $i < $nfunc; $i++) {
 		my $fname = 'wasm_func_' . ($EXPORT[$i]{name} // $i);
 		say "$fname:";
-		my $size = take_num();
-		my $nlocals = take_num();
+		my $size = take_num(1);
+		my $nlocals = take_num(1);
 		my @locals;
 		for (1..$nlocals) {
-			my $num = take_num();
+			my $num = take_num(1);
 			my $type = take_byte();
 			push @locals, $type for $num;
 		}
-		l "  Function with body size $size, local(s) [@locals]";
+		l "  Function with body size $size, local(s) " . arglist(@locals);
 		parse_code($i, $fname, \@locals);
 	}
 }

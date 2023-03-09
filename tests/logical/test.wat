@@ -8,6 +8,8 @@
     call_indirect 1
     (i32.eq (i32.shl (i32.const -1) (i32.const 1)) (i32.const -2))
     call_indirect 1
+    (i32.eq (i32.clz (i32.const 15)) (i32.const 28))
+    call_indirect 1
 
     i32.const 42
   )
