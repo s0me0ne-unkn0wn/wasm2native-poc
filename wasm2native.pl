@@ -98,11 +98,11 @@ sub parse_exports_section() {
 	}
 }
 
-sub op_mem_load($ext, $width) {
+sub op_mem_load($ext, $reg, $width) {
 	[
 		'pop rsi',
 		'add rsi, memory + \1',
-		"mov$ext rax, $width [rsi]",
+		"mov$ext ${reg}ax, $width [rsi]",
 		'push rax',
 	]
 }
@@ -118,11 +118,11 @@ sub op_mem_store($width) {
 	]	
 }
 
-sub op_cmp($cond, $width) {
+sub op_cmp($cond, $reg) {
 	[
 		'pop rbx',
 		'pop rax',
-		"cmp ${width}ax, ${width}bx",
+		"cmp ${reg}ax, ${reg}bx",
 		"set$cond al",
 		'movzx rax, al',
 		'push rax',
@@ -146,13 +146,13 @@ my %OPCODE = (
 	0x22 => { name => 'local.tee \0', args => [ TU32 ], code => [ 'mov rax, [rsp]',	'mov [%0], rax'	]},
 	0x23 => { name => 'global.get \0', args => [ TU32 ], code => [ 'push qword [^0]']},
 	0x24 => { name => 'global.set \0', args => [ TU32 ], code => [ 'pop rax', 'mov [^0], rax']},
-	0x28 => { name => 'i32.load align=\0 offset=\1', args => [ TU32, TU32 ], code => op_mem_load('sx', 'dword') },
-	0x29 => { name => 'i64.load align=\0 offset=\1', args => [ TU32, TU32 ], code => op_mem_load('', 'qword') },
-	0x2c => { name => 'i32.load8_s align=\0 offset=\1', args => [ TU32, TU32 ], code => op_mem_load('sx', 'byte') },
-	0x2d => { name => 'i32.load8_u align=\0 offset=\1', args => [ TU32, TU32 ], code => op_mem_load('zx', 'byte') },
-	0x2f => { name => 'i32.load16_u align=\0 offset=\1', args => [ TU32, TU32 ], code => op_mem_load('zx', 'word') },
-	0x31 => { name => 'i64.load8_u align=\0 offset=\1', args => [ TU32, TU32 ], code => op_mem_load('zx', 'byte') },
-	0x35 => { name => 'i64.load32_u align=\0 offset=\1', args => [ TU32, TU32 ], code => op_mem_load('zx', 'dword') },
+	0x28 => { name => 'i32.load align=\0 offset=\1', args => [ TU32, TU32 ], code => op_mem_load('sx', 'r', 'dword') },
+	0x29 => { name => 'i64.load align=\0 offset=\1', args => [ TU32, TU32 ], code => op_mem_load('', 'r', 'qword') },
+	0x2c => { name => 'i32.load8_s align=\0 offset=\1', args => [ TU32, TU32 ], code => op_mem_load('sx', 'r', 'byte') },
+	0x2d => { name => 'i32.load8_u align=\0 offset=\1', args => [ TU32, TU32 ], code => op_mem_load('zx', 'r', 'byte') },
+	0x2f => { name => 'i32.load16_u align=\0 offset=\1', args => [ TU32, TU32 ], code => op_mem_load('zx', 'r', 'word') },
+	0x31 => { name => 'i64.load8_u align=\0 offset=\1', args => [ TU32, TU32 ], code => op_mem_load('zx', 'r', 'byte') },
+	0x35 => { name => 'i64.load32_u align=\0 offset=\1', args => [ TU32, TU32 ], code => op_mem_load('', 'e', 'dword') },
 	0x36 => { name => 'i32.store align=\0 offset=\1', args => [ TU32, TU32 ], code => op_mem_store('dword') },
 	0x37 => { name => 'i64.store align=\0 offset=\1', args => [ TU32, TU32 ], code => op_mem_store('qword') },
 	0x3a => { name => 'i32.store8 align=\0 offset=\1', args => [ TU32, TU32 ], code => op_mem_store('byte') },
@@ -227,8 +227,8 @@ my %OPCODE = (
 	0x85 => { name => 'i64.xor', code => [ 'pop rax', 'xor [rsp], rax' ] },
 	0x86 => { name => 'i64.shl', code => [ 'pop rcx', 'pop rax', 'shl rax, cl', 'push rax' ] },
 	0x89 => { name => 'i64.rotl', code => [ 'pop rcx', 'pop rax', 'rol rax, cl', 'push rax' ] },
-	0xa7 => { name => 'i32.wrap_i64', code => [ 'pop rax', 'movzx rax, eax', 'push rax' ]},
-	0xad => { name => 'i64.extend_i32_u', code => [ 'pop rax', 'movzx rax, eax', 'push rax' ]},
+	0xa7 => { name => 'i32.wrap_i64', code => [ 'pop rax', 'mov eax, eax', 'push rax' ]},
+	0xad => { name => 'i64.extend_i32_u', code => [ 'pop rax', 'mov eax, eax', 'push rax' ]},
 );
 
 sub parse_code($findex, $fname, $locals) {
@@ -323,12 +323,12 @@ sub parse_code($findex, $fname, $locals) {
 		my $op = take_byte();
 		if($op == 0x02) { # block
 			say "\t;; block";
-			unshift @frames, { type => 'block', rtype => take_byte(), id => $blkid++ };
+			unshift @frames, { type => 'block', rtype => take_byte(), id => ++$blkid };
 			say "\tpush rbp";
 			say "\tmov rbp, rsp";
 		} elsif($op == 0x03) { # loop
 			say "\t;; loop";
-			unshift @frames, { type => 'loop', rtype => take_byte(), id => $blkid++ };
+			unshift @frames, { type => 'loop', rtype => take_byte(), id => ++$blkid };
 			say "\tpush rbp";
 			say "\tmov rbp, rsp";
 			say ".${fname}_label_loop_${blkid}_branch_target:";
@@ -373,7 +373,7 @@ sub parse_code($findex, $fname, $locals) {
 				say "\tpop rbp";
 				# shift @frames;
 			}
-			say "\tjmp .${fname}_label_block_$tframe->{id}_branch_target";
+			say "\tjmp .${fname}_label_$tframe->{type}_$tframe->{id}_branch_target";
 		} elsif($op == 0x0d) { # br_if
 			my $target = take_num(1);
 			say "\t;; br_if $target";
@@ -393,7 +393,7 @@ sub parse_code($findex, $fname, $locals) {
 				say "\tpop rbp";
 				# shift @frames;
 			}
-			say "\tjmp .${fname}_label_block_$tframe->{id}_branch_target";
+			say "\tjmp .${fname}_label_$tframe->{type}_$tframe->{id}_branch_target";
 
 			say ".${fname}_label_br_else_$lblid:"
 		} elsif($op == 0x0e) { # br_table
