@@ -157,13 +157,14 @@ my %OPCODE = (
 	0x37 => { name => 'i64.store align=\0 offset=\1', args => [ TU32, TU32 ], code => op_mem_store('qword') },
 	0x3a => { name => 'i32.store8 align=\0 offset=\1', args => [ TU32, TU32 ], code => op_mem_store('byte') },
 	0x3b => { name => 'i32.store16 align=\0 offset=\1', args => [ TU32, TU32 ], code => op_mem_store('word') },
+	0x40 => { name => 'memory.grow', code => [ 'pop rax', 'push -1' ] }, # FIXME: Stub
 	0x41 => { name => 'i32.const \0', args => [ TI32 ], code => [ 'push \0' ] },
-	0x42 => { name => 'i64.const \0', args => [ TI32 ], code => [ 'push \0' ] },
+	0x42 => { name => 'i64.const \0', args => [ TI64 ], code => [ 'push \0' ] },
 	0x45 => { name => 'i32.eqz', code => [
 		'pop rax',
 		'test eax, eax',
 		'sete al',
-		'movzx rax, al', # FIXME: Is it safe to omit REX.W here and below?
+		'movzx rax, al', # FIXME: Is it safe to omit REX.W here and everywhere?
 		'push rax',
 	]},
 	0x46 => { name => 'i32.eq', code => op_cmp('e', 'e') },
@@ -221,8 +222,11 @@ my %OPCODE = (
 		'div rbx',
 		'push rax',
 	]},
+	0x83 => { name => 'i64.and', code => [ 'pop rax', 'and [rsp], rax' ] },
 	0x84 => { name => 'i64.or', code => [ 'pop rax', 'or [rsp], rax' ] },
+	0x85 => { name => 'i64.xor', code => [ 'pop rax', 'xor [rsp], rax' ] },
 	0x86 => { name => 'i64.shl', code => [ 'pop rcx', 'pop rax', 'shl rax, cl', 'push rax' ] },
+	0x89 => { name => 'i64.rotl', code => [ 'pop rcx', 'pop rax', 'rol rax, cl', 'push rax' ] },
 	0xa7 => { name => 'i32.wrap_i64', code => [ 'pop rax', 'movzx rax, eax', 'push rax' ]},
 	0xad => { name => 'i64.extend_i32_u', code => [ 'pop rax', 'movzx rax, eax', 'push rax' ]},
 );
@@ -230,7 +234,7 @@ my %OPCODE = (
 sub parse_code($findex, $fname, $locals) {
 	sub gen_call($type, $dest) {
 		# FIXME: It's obviously possible to overwrite the WASM arguments frame with the ABI frame
-		# contents before the call and not to spend excessive stack space; It's just KISS for now
+		# contents before the call and not to spend excessive stack space; it's just KISS for now
 		my $nreg_params = min(scalar $type->{par}->@*, scalar @abi_param_regs);
 		my $nstack_params = max(0, $type->{par}->@* - @abi_param_regs);
 		# [rsp] -> last argument
@@ -554,7 +558,7 @@ sub parse_code_section() {
 		for (1..$nlocals) {
 			my $num = take_num(1);
 			my $type = take_byte();
-			push @locals, $type for $num;
+			push @locals, $type for (1..$num);
 		}
 		l "  Function with body size $size, local(s) " . arglist(@locals);
 		parse_code($i, $fname, \@locals);
@@ -745,7 +749,10 @@ while($CODE) {
 	my $type = take_byte();
 	my $len = take_num(1);
 	l "Section type $type, length $len";
-	if($type == 1) {
+	if($type == 0) {
+		l "  Ignoring custom section";
+		take($len);
+	} elsif($type == 1) {
 		parse_type_section();
 	} elsif($type == 2) {
 		parse_imports_section();
