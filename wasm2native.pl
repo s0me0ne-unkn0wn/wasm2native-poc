@@ -49,7 +49,7 @@ my ($magic, $version) = unpack('a4 l', take(8));
 die "Wrong signature" unless $magic eq "\x00asm";
 l "WASM version $version";
 
-my (@TYPE, @FTYPE, @EXPORT, @GLOBALS);
+my (@TYPE, @FTYPE, @EXPORT, @GLOBALS, @FIMPORTS);
 my @abi_param_regs = qw(rdi rsi rdx rcx r8 r9);
 
 sub parse_type_section() {
@@ -60,7 +60,7 @@ sub parse_type_section() {
 		die "  Unknown entity type $etype" unless $etype == 0x60;
 		my @par = take_lparr_byte();
 		my @res = take_lparr_byte();
-		l "  Function with param(s) [@par] and result(s) [@res]";
+		l "  Function with param(s) " . arglist(@par) . " and result(s) " . arglist(@res);
 		$TYPE[$i] = { par => \@par, res => \@res };
 	}
 }
@@ -68,9 +68,10 @@ sub parse_type_section() {
 sub parse_function_section() {
 	l "Parsing function index(es)";
 	my @func = take_vec();
-	for (0..$#func) {
-		l "  Function $_ index $func[$_]";
-		$FTYPE[$_] = { typeidx => $func[$_], type => $TYPE[$func[$_]] };
+	my $nimports = scalar @FIMPORTS;
+	for ($nimports..($#func + $nimports)) {
+		l "  Function $_ type index $func[$_ - $nimports]";
+		$FTYPE[$_] = { typeidx => $func[$_ - $nimports], type => $TYPE[$func[$_ - $nimports]] };
 	}
 }
 
@@ -157,9 +158,9 @@ my %OPCODE = (
 	0x37 => { name => 'i64.store align=\0 offset=\1', args => [ TU32, TU32 ], code => op_mem_store('qword') },
 	0x3a => { name => 'i32.store8 align=\0 offset=\1', args => [ TU32, TU32 ], code => op_mem_store('byte') },
 	0x3b => { name => 'i32.store16 align=\0 offset=\1', args => [ TU32, TU32 ], code => op_mem_store('word') },
-	0x40 => { name => 'memory.grow', code => [ 'pop rax', 'push -1' ] }, # FIXME: Stub
-	0x41 => { name => 'i32.const \0', args => [ TI32 ], code => [ 'push \0' ] },
-	0x42 => { name => 'i64.const \0', args => [ TI64 ], code => [ 'push \0' ] },
+	0x40 => { name => 'memory.grow', code => [ 'mov rax, -1', 'mov [rsp], rax' ] }, # FIXME: Stub
+	0x41 => { name => 'i32.const \0', args => [ TI32 ], code => [ 'mov eax, \0', 'push rax' ] }, # FIXME: Should be sign-extended or not?
+	0x42 => { name => 'i64.const \0', args => [ TI64 ], code => [ 'mov rax, \0', 'push rax' ] },
 	0x45 => { name => 'i32.eqz', code => [
 		'pop rax',
 		'test eax, eax',
@@ -433,7 +434,9 @@ sub parse_code($findex, $fname, $locals) {
 			}
 		} elsif($op == 0x0f) { # return
 			say "\t;; return";
-			say "\tpop rax";
+			if(TINT($type->{res}[0])) {
+				say "\tpop rax";
+			}
 			for(@frames) {
 				say "\tmov rsp, rbp";
 				say "\tpop rbp";
@@ -442,7 +445,7 @@ sub parse_code($findex, $fname, $locals) {
 		} elsif($op == 0x10) { # call
 			my $func = take_num(1);
 			my $type = $FTYPE[$func]{type};
-			my $fname = 'wasm_func_' . ($EXPORT[$func]{name} // $func);
+			my $fname = $func < @FIMPORTS ? $FIMPORTS[$func]{'name'} : 'wasm_func_' . ($EXPORT[$func]{name} // $func);
 			say "\t;; call $func ($fname): " . arglist($type->{par}->@*) . " -> " . arglist($type->{res}->@*);
 			gen_call($type, $fname);
 		} elsif($op == 0x11) { # call_indirect
@@ -549,7 +552,8 @@ sub take_limits() {
 sub parse_code_section() {
 	my $nfunc = take_num(1);
 	l "Parsing $nfunc function(s)";
-	for(my $i = 0; $i < $nfunc; $i++) {
+	my $nimports = scalar @FIMPORTS;
+	for(my $i = $nimports; $i < $nfunc + $nimports; $i++) {
 		my $fname = 'wasm_func_' . ($EXPORT[$i]{name} // $i);
 		say "$fname:";
 		my $size = take_num(1);
@@ -568,6 +572,7 @@ sub parse_code_section() {
 sub parse_imports_section() {
 	my $nimport = take_num(1);
 	l "Parsing $nimport import(s)";
+	my $findex = 0;
 	for(my $i = 0; $i < $nimport; $i++) {
 		my $module = take_name();
 		my $name = take_name();
@@ -575,7 +580,9 @@ sub parse_imports_section() {
 		l "  Import $module\::$name: type $type";
 		if($type == 0x00) { # Function
 			my $typeidx = take_num(1);
-			l "    Function of type $typeidx";
+			l "    Function of type $typeidx, index $findex";
+			$FTYPE[$findex] = { typeidx => $typeidx, type => $TYPE[$typeidx] };
+			$FIMPORTS[$findex++] = { typeidx => $typeidx, module => $module, name => $name };
 		} elsif($type == 0x01) { # Table
 			my $reftype = take_byte();
 			my $limits = take_limits();
