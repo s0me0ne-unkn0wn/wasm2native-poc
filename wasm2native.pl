@@ -107,8 +107,11 @@ sub parse_exports_section() {
 sub op_mem_load($ext, $reg, $width) {
 	[
 		'pop rsi',
-		'add rsi, memory + \1',
-		"mov$ext ${reg}ax, $width [rsi]",
+		# 'add rsi, memory + \1',
+		'mov rax, _GLOBAL_OFFSET_TABLE_',
+		'mov rax, [rax + memory wrt ..got]',
+		'mov rax, memory wrt ..got',
+		"mov$ext ${reg}ax, $width [rsi + rax + \\1]",
 		'push rax',
 	]
 }
@@ -119,8 +122,10 @@ sub op_mem_store($width) {
 	[
 		'pop rax',
 		'pop rdi',
-		'add rdi, memory + \1',
-		"mov $width [rdi], $op_mem_store_regs{$width}",
+		# 'add rdi, memory + \1',
+		'mov rbx, _GLOBAL_OFFSET_TABLE_',
+		'mov rbx, [rbx + memory wrt ..got]',
+		"mov $width [rdi + rbx + \\1], $op_mem_store_regs{$width}",
 	]	
 }
 
@@ -285,7 +290,6 @@ sub parse_code($findex, $fname, $locals) {
 	# with the outer world
 	my $type = $FTYPE[$findex]{type};
 	l "Type: " . arglist($type->{par}->@*) . ' -> ' . arglist($type->{res}->@*);
-	# die "Number of parameters greater than " . scalar(@abi_param_regs) . " is not supported yet" if $type->{par}->@* > @abi_param_regs;
 
 	my @localmap;
 
@@ -418,8 +422,10 @@ sub parse_code($findex, $fname, $locals) {
 				say "\tpop rax";
 			}
 
-			say "\tlea rcx, [.br_table_$lblid + rcx * 8]";
-			say "\tjmp [rcx]";
+			say "\tlea rbx, [rel .br_table_$lblid]";
+			say "\tshl rcx, 3";
+			say "\tadd rbx, rcx";
+			say "\tjmp [rbx]";
 
 			my $target = max @brtable;
 			while($target >= 0) {
@@ -459,8 +465,11 @@ sub parse_code($findex, $fname, $locals) {
 			my $type = $TYPE[$typeidx];
 			say "\t;; call_indirect $tableidx $typeidx: " . arglist($type->{par}->@*) . " -> " . arglist($type->{res}->@*);
 			say "\tpop rax";
-			say "\tmov rdi, [wasm_table_$tableidx + rax * 8]";
-			gen_call($type, 'rdi');
+			say "\tmov rbx, _GLOBAL_OFFSET_TABLE_";
+			say "\tmov rbx, [rbx + rax*8 + wasm_table_$tableidx wrt ..got]";
+			# say "\tmov rdi, [wasm_table_$tableidx + rax * 8]";
+			# say "\tmov rbx, [rbx + rax * 8]";
+			gen_call($type, 'rbx');
 		} elsif(my $opcode = $OPCODE{$op}) {
 			my @args;
 			if($opcode->{args}) {
@@ -761,10 +770,12 @@ EOF
 	say <<EOF
 section .text
 	default rel
-	global init_pvf
-	global validate_block
+	global init_pvf:function
+	global validate_block:function
 	global __heap_base
+	global wasm_table_0
 	extern ext_logging_log_version_1
+	extern _GLOBAL_OFFSET_TABLE_
 
 init_pvf:
 	push rbp
@@ -829,7 +840,9 @@ if(@DATASEG) {
 		my $seg = $DATASEG[$i];
 		say $seg->{init};
 		say "\tpop rdi";
-		say "\tadd rdi, memory";
+		say "\tmov rax, _GLOBAL_OFFSET_TABLE_";
+		say "\tmov rax, [rax + memory wrt ..got]";
+		say "\tadd rdi, rax";
 		say "\tmov rsi, data_segment_$i";
 		say "\tmov rcx, " . scalar($seg->{bytes}->@*);
 		say "\trep movsb";
@@ -847,7 +860,9 @@ if(@ELEMENTS) {
 			say $elem->{init_offset};
 			say "\tpop rax";
 			say "\tcld";
-			say "\tlea rdi, [wasm_table_$elem->{tableidx} + rax * 8]";
+			say "\tmov rbx, _GLOBAL_OFFSET_TABLE_";
+			say "\tmov rbx, [rbx + wasm_table_$elem->{tableidx} wrt ..got]";
+			say "\tlea rdi, [rbx + rax * 8]";
 			for my $ref ($elem->{funcref}->@*) {
 				say "\tlea rax, [" . ($EXPORT[$ref]{name} // "wasm_func_$ref") . ']';
 				say "\tstosq";
