@@ -482,7 +482,7 @@ sub parse_code($findex, $fname, $locals) {
 				my $o = $_;
 				$o =~ s/\\(\d)/$args[$1]/xg;
 				$o =~ s/%(\d+)/$localmap[$args[$1]]/xg;
-				$o =~ s|\^(\d+)|"wasm_global_" . ($GLOBALS[$args[$1]]{name} // $args[$1])|eg;
+				$o =~ s|\^(\d+)|($GLOBALS[$args[$1]]{name} // "wasm_global_$args[$1]")|eg;
 				$o =~ s/@(\d+)/
 					my $lblid = $lblgid + $1;
 					$maxlblid = max($lblid, $1);
@@ -816,7 +816,7 @@ if(@GLOBALS) {
 		my $global = $GLOBALS[$i];
 		say $global->{init};
 		say "\tpop rax";
-		say "\tmov [wasm_global_" . ($global->{name} // $i) . "], rax";
+		say "\tmov [" . ($global->{name} // "wasm_global_$i") . "], rax";
 	}
 }
 
@@ -867,7 +867,7 @@ if($RUNTIME eq 'test42') {
 if(@GLOBALS) {
 	say "\talign 16";
 	for my $i (0..$#GLOBALS) {
-		say "\twasm_global_" . ($GLOBALS[$i]{name} // $i) . ": dq 0";
+		say "\t" . ($GLOBALS[$i]{name} // "wasm_global_$i") . ": dq 0";
 	}
 }
 
