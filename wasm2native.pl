@@ -6,6 +6,7 @@ use List::Util qw(sum max min any);
 use DDP multiline => 0;
 use feature qw(signatures);
 use bytes;
+use Getopt::Long;
 no warnings qw(experimental::signatures);
 
 use constant TNONE => 0x40;
@@ -18,6 +19,10 @@ use constant TU32 => -127;
 
 sub TINT($type) { any { $type == $_ } (TI32, TI64) }
 sub TFLT($type) { any { $type == $_ } (TF32, TF64) }
+
+my $RUNTIME;
+GetOptions('runtime=s' => \$RUNTIME);
+$RUNTIME = 'test42' unless any { $RUNTIME eq $_ } qw(pvf);
 
 $ARGV[0] or die;
 
@@ -445,7 +450,7 @@ sub parse_code($findex, $fname, $locals) {
 		} elsif($op == 0x10) { # call
 			my $func = take_num(1);
 			my $type = $FTYPE[$func]{type};
-			my $fname = $func < @FIMPORTS ? $FIMPORTS[$func]{'name'} : 'wasm_func_' . ($EXPORT[$func]{name} // $func);
+			my $fname = $func < @FIMPORTS ? $FIMPORTS[$func]{'name'} . ' wrt ..plt' : ($EXPORT[$func]{name} // 'wasm_func_' . $func);
 			say "\t;; call $func ($fname): " . arglist($type->{par}->@*) . " -> " . arglist($type->{res}->@*);
 			gen_call($type, $fname);
 		} elsif($op == 0x11) { # call_indirect
@@ -554,7 +559,7 @@ sub parse_code_section() {
 	l "Parsing $nfunc function(s)";
 	my $nimports = scalar @FIMPORTS;
 	for(my $i = $nimports; $i < $nfunc + $nimports; $i++) {
-		my $fname = 'wasm_func_' . ($EXPORT[$i]{name} // $i);
+		my $fname = ($EXPORT[$i]{name} // "wasm_func_$i");
 		say "$fname:";
 		my $size = take_num(1);
 		my $nlocals = take_num(1);
@@ -730,7 +735,8 @@ sub parse_data_section() {
 	}
 }
 
-say <<EOF
+if($RUNTIME eq 'test42') {
+	say <<EOF
 section .text
 	default rel
 	global main
@@ -751,6 +757,25 @@ main:
 	ret
 EOF
 ;
+} elsif($RUNTIME eq 'pvf') {
+	say <<EOF
+section .text
+	default rel
+	global init_pvf
+	global validate_block
+	global __heap_base
+	extern ext_logging_log_version_1
+
+init_pvf:
+	push rbp
+	call init_globals
+	call init_data_segments
+	call init_tables
+	pop rbp
+	ret
+EOF
+;
+}
 
 while($CODE) {
 	my $type = take_byte();
@@ -824,7 +849,7 @@ if(@ELEMENTS) {
 			say "\tcld";
 			say "\tlea rdi, [wasm_table_$elem->{tableidx} + rax * 8]";
 			for my $ref ($elem->{funcref}->@*) {
-				say "\tlea rax, [wasm_func_" . ($EXPORT[$ref]{name} // $ref) . ']';
+				say "\tlea rax, [" . ($EXPORT[$ref]{name} // "wasm_func_$ref") . ']';
 				say "\tstosq";
 			}
 		}
@@ -833,12 +858,11 @@ if(@ELEMENTS) {
 
 say "\tret";
 
+say 'section .data';
 
-say <<EOF
-section .data
-	fmt: db "%d", 10, 0
-EOF
-;
+if($RUNTIME eq 'test42') {
+	say 'fmt: db "%d", 10, 0';
+}
 
 if(@GLOBALS) {
 	say "\talign 16";
