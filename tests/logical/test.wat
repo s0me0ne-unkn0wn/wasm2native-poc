@@ -3,7 +3,7 @@
   (func $fuckup
     unreachable
   )
-  (func (export "main") (result i32)
+  (func (export "test") (result i32)
     (i32.eq (i32.shr_u (i32.const -1) (i32.const 4)) (i32.const 268435455))
     call_indirect 1
     (i32.eq (i32.shl (i32.const -1) (i32.const 1)) (i32.const -2))

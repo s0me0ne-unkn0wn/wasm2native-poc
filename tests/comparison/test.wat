@@ -3,7 +3,7 @@
   (func $fuckup
     unreachable
   )
-  (func (export "main") (result i32)
+  (func (export "test") (result i32)
     (i32.lt_u (i32.const 10) (i32.const 20))
     call_indirect 1
 

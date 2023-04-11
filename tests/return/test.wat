@@ -8,7 +8,7 @@
 		return
 		unreachable
 	)
-	(func (export "main") (result i32)
+	(func (export "test") (result i32)
 		call $get50
 		i32.const 8
 		i32.sub

@@ -57,6 +57,11 @@ l "WASM version $version";
 my (@TYPE, @FTYPE, @EXPORT, @GLOBALS, @FIMPORTS);
 my @abi_param_regs = qw(rdi rsi rdx rcx r8 r9);
 
+my @EMIT;
+sub emit($insn) { push @EMIT, $insn }
+sub emitt($insn) { push @EMIT, "\t$insn" }
+sub emitl($text) { push @EMIT, grep { $_ } split /\n/, $text }
+
 sub parse_type_section() {
 	my $ntypes = unpack('C', take(1));
 	l "Parsing $ntypes type(s)";
@@ -104,13 +109,16 @@ sub parse_exports_section() {
 	}
 }
 
+my $need_got = 0;
+
 sub op_mem_load($ext, $reg, $width) {
+	$need_got = 1;
 	[
 		'pop rsi',
 		# 'add rsi, memory + \1',
 		'mov rax, _GLOBAL_OFFSET_TABLE_',
 		'mov rax, [rax + memory wrt ..got]',
-		'mov rax, memory wrt ..got',
+		# 'mov rax, memory wrt ..got',
 		"mov$ext ${reg}ax, $width [rsi + rax + \\1]",
 		'push rax',
 	]
@@ -119,6 +127,7 @@ sub op_mem_load($ext, $reg, $width) {
 my %op_mem_store_regs = (byte => 'al', word => 'ax', dword => 'eax', qword => 'rax');
 
 sub op_mem_store($width) {
+	$need_got = 1;
 	[
 		'pop rax',
 		'pop rdi',
@@ -249,32 +258,32 @@ sub parse_code($findex, $fname, $locals) {
 		my $nreg_params = min(scalar $type->{par}->@*, scalar @abi_param_regs);
 		my $nstack_params = max(0, $type->{par}->@* - @abi_param_regs);
 		# [rsp] -> last argument
-		say "\tpush r10";
+		emitt 'push r10';
 		if($type->{par}->@*) {
 			my $argoffset = 8; # [rsp+8] -> last argument
 			if($nstack_params) {
 				for(1..$nstack_params) {
-					say "\tpush qword [rsp+$argoffset]"; # [rsp+16] -> last argument; [rsp+24] -> next argument
+					emitt "push qword [rsp+$argoffset]"; # [rsp+16] -> last argument; [rsp+24] -> next argument
 					$argoffset += 16
 				}
 			}
 			my @regs = @abi_param_regs[0..($nreg_params - 1)];
 			while(my $reg = pop @regs) {
-				say "\tmov $reg, [rsp+$argoffset]";
+				emitt "mov $reg, [rsp+$argoffset]";
 				$argoffset += 8;
 			}
 		}
 
-		say "\txor rax, rax";
-		say "\tcall $dest";
+		emitt 'xor rax, rax';
+		emitt "call $dest";
 
-		say "\tadd rsp, " . ($nstack_params * 8) if $nstack_params; # Discard ABI call frame, if any
-		say "\tpop r10";
-		say "\tadd rsp, " . ($type->{par}->@* * 8) if $type->{par}->@*; # Discard WASM argument frame, if any
+		emitt 'add rsp, ' . ($nstack_params * 8) if $nstack_params; # Discard ABI call frame, if any
+		emitt 'pop r10';
+		emitt 'add rsp, ' . ($type->{par}->@* * 8) if $type->{par}->@*; # Discard WASM argument frame, if any
 
 		if($type->{res}->@*) {
 			if(TINT($type->{res}[0])) {
-				say "\tpush rax";
+				emitt 'push rax';
 			} else {
 				die "Unsupported return type $type->{res}[0]";
 			}
@@ -283,9 +292,9 @@ sub parse_code($findex, $fname, $locals) {
 	my $lblgid = 0;
 	my $blkid = 0;
 	my @frames = ({ type => 'func', rtype => $FTYPE[$findex]{type}{res}[0] });
-	say "\tpush rbp";
-	say "\tmov rbp, rsp"; # Block frame
-	say "\tmov r10, rsp"; # Function frame
+	emitt 'push rbp';
+	emitt 'mov rbp, rsp'; # Block frame
+	emitt 'mov r10, rsp'; # Function frame
 	# Function call must obey SysV ABI as exported and imported functions use it to communicate
 	# with the outer world
 	my $type = $FTYPE[$findex]{type};
@@ -302,13 +311,13 @@ sub parse_code($findex, $fname, $locals) {
 	my $localidx = 0;
 
 	if(my $fullnlocals = $nreg_params + $nstack_params + $nlocals) {
-		say "\tsub rsp, " . ($fullnlocals * 8);
+		emitt 'sub rsp, ' . ($fullnlocals * 8);
 	}
 
 	# Load register params
 	my @regs = @abi_param_regs;
 	for (1..$nreg_params) {
-		say "\tmov [rbp-$frame_offset], " . shift(@regs);
+		emitt "mov [rbp-$frame_offset], " . shift(@regs);
 		$localmap[$localidx++] = "r10-$frame_offset";
 		$frame_offset += 8;
 	}
@@ -316,8 +325,8 @@ sub parse_code($findex, $fname, $locals) {
 	# Load stack params. They could have been left on caller's frame as it doesn't expect them to
 	# persist anyway, but that would ruin stack usage determinism across platforms
 	for (1..$nstack_params) {
-		say "\tmov rax, [rbp+$caller_offset]";
-		say "\tmov [rbp-$frame_offset], rax";
+		emitt "mov rax, [rbp+$caller_offset]";
+		emitt "\tmov [rbp-$frame_offset], rax";
 		$localmap[$localidx++] = "r10-$frame_offset";
 		$frame_offset += 8;
 		$caller_offset += 8;
@@ -332,39 +341,31 @@ sub parse_code($findex, $fname, $locals) {
 	while($CODE) {
 		my $op = take_byte();
 		if($op == 0x02) { # block
-			say "\t;; block";
+			emitt ';; block';
 			unshift @frames, { type => 'block', rtype => take_byte(), id => ++$blkid };
-			say "\tpush rbp";
-			say "\tmov rbp, rsp";
+			emitt 'push rbp';
+			emitt 'mov rbp, rsp';
 		} elsif($op == 0x03) { # loop
-			say "\t;; loop";
+			emitt ';; loop';
 			unshift @frames, { type => 'loop', rtype => take_byte(), id => ++$blkid };
-			say "\tpush rbp";
-			say "\tmov rbp, rsp";
-			say ".${fname}_label_loop_${blkid}_branch_target:";
+			emitt 'push rbp';
+			emitt 'mov rbp, rsp';
+			emit ".${fname}_label_loop_${blkid}_branch_target:";
 		} elsif($op == 0x0b) { # end
 			say "\t;; end";
 			if(@frames) {
 				my $frame = shift @frames;
 				if($frame->{type} ne 'func') {
-					if(TINT($frame->{rtype})) {
-						say "\tpop rax";
-					}
-					if($frame->{type} eq 'block') {
-						say ".${fname}_label_block_$frame->{id}_branch_target:";
-					}
-					say "\tmov rsp, rbp";
-					say "\tpop rbp";
-					if(TINT($frame->{rtype})) {
-						say "\tpush rax";
-					}				
+					emitt 'pop rax' if TINT($frame->{rtype});
+					emit ".${fname}_label_block_$frame->{id}_branch_target:" if $frame->{type} eq 'block';
+					emitt 'mov rsp, rbp';
+					emitt 'pop rbp';
+					emitt 'push rax' if TINT($frame->{rtype});
 				} else {
-					if(TINT($frame->{rtype})) {
-						say "\tpop rax";
-					}
-					say "\tmov rsp, rbp";
-					say "\tpop rbp";
-					say "\tret";
+					emitt 'pop rax' if TINT($frame->{rtype});
+					emitt 'mov rsp, rbp';
+					emitt 'pop rbp';
+					emitt 'ret';
 					return;
 				}
 			} else {
@@ -372,101 +373,91 @@ sub parse_code($findex, $fname, $locals) {
 			}
 		} elsif($op == 0x0c) { # br
 			my $target = take_num(1);
-			say "\t;; br $target";
+			emitt ";; br $target";
 			my $tframe = $frames[$target];
-			if(TINT($tframe->{rtype})) {
-				say "\tpop rax";
-			}
-			# shift @frames;
+			emitt 'pop rax' if TINT($tframe->{rtype});
 			while($target-- > 0) {
-				say "\tmov rsp, rbp";
-				say "\tpop rbp";
-				# shift @frames;
+				emitt 'mov rsp, rbp';
+				emitt 'pop rbp';
 			}
-			say "\tjmp .${fname}_label_$tframe->{type}_$tframe->{id}_branch_target";
+			emitt "jmp .${fname}_label_$tframe->{type}_$tframe->{id}_branch_target";
 		} elsif($op == 0x0d) { # br_if
 			my $target = take_num(1);
-			say "\t;; br_if $target";
+			emitt ";; br_if $target";
 			my $tframe = $frames[$target];
 			my $lblid = $lblgid++;
-			say "\tpop rax";
-			say "\ttest rax, rax";
-			say "\tjz .${fname}_label_br_else_$lblid";
+			emitt 'pop rax';
+			emitt 'test rax, rax';
+			emitt "jz .${fname}_label_br_else_$lblid";
 
 			# Same as br
-			if(TINT($tframe->{rtype})) {
-				say "\tpop rax";
-			}
-			# shift @frames;
+			emitt 'pop rax' if TINT($tframe->{rtype});
 			while($target-- > 0) {
-				say "\tmov rsp, rbp";
-				say "\tpop rbp";
-				# shift @frames;
+				emitt 'mov rsp, rbp';
+				emitt 'pop rbp';
 			}
-			say "\tjmp .${fname}_label_$tframe->{type}_$tframe->{id}_branch_target";
+			emitt "jmp .${fname}_label_$tframe->{type}_$tframe->{id}_branch_target";
 
-			say ".${fname}_label_br_else_$lblid:"
+			emit ".${fname}_label_br_else_$lblid:"
 		} elsif($op == 0x0e) { # br_table
 			my @brtable = take_vec(1);
 			my $default_target = take_num(1);
 			push @brtable, $default_target;
 			my $default_frame = $frames[$default_target];
-			say "\t;; br_table " . np(@brtable) . " $default_target";
+			emitt ";; br_table " . np(@brtable) . " $default_target";
 			my $lblid = $lblgid++;
-			say "\tpop rcx"; # Jump target index
-			say "\tmov rbx, $#brtable"; # The last element is the default one
-			say "\tcmp rcx, rbx"; 
-			say "\tcmova rcx, rbx"; # Use default index if overflowed
+			emitt 'pop rcx'; # Jump target index
+			emitt "mov rbx, $#brtable"; # The last element is the default one
+			emitt 'cmp rcx, rbx'; 
+			emitt 'cmova rcx, rbx'; # Use default index if overflowed
 
-			if(TINT($default_frame->{rtype})) { # All the branch targets share the same type
-				say "\tpop rax";
-			}
+			emitt 'pop rax' if TINT($default_frame->{rtype});  # All the branch targets share the same type
 
-			say "\tlea rbx, [rel .br_table_$lblid]";
-			say "\tshl rcx, 3";
-			say "\tadd rbx, rcx";
-			say "\tjmp [rbx]";
+			emitt "lea rbx, [rel .br_table_$lblid]";
+			emitt 'shl rcx, 3';
+			emitt 'add rbx, rcx';
+			emitt 'jmp [rbx]';
 
 			my $target = max @brtable;
 			while($target >= 0) {
 				my $bframe = $frames[$target];
-				say ".br_table_${lblid}_exit_$target:";
+				emit ".br_table_${lblid}_exit_$target:";
 				for (0..($target - 1)) {
-					say "\tmov rsp, rbp";
-					say "\tpop rbp";
+					emitt 'mov rsp, rbp';
+					emitt 'pop rbp';
 				}
-				say "\tjmp .${fname}_label_block_$bframe->{id}_branch_target";
+				emitt "jmp .${fname}_label_block_$bframe->{id}_branch_target";
 				--$target;
 			}
 
-			say ".br_table_$lblid:";
+			emit ".br_table_$lblid:";
 			for (@brtable) {
-				say "\tdq .br_table_${lblid}_exit_$_";
+				emitt "dq .br_table_${lblid}_exit_$_";
 			}
 		} elsif($op == 0x0f) { # return
-			say "\t;; return";
-			if(TINT($type->{res}[0])) {
-				say "\tpop rax";
-			}
+			emitt ';; return';
+			emitt 'pop rax' if TINT($type->{res}[0]);
 			for(@frames) {
-				say "\tmov rsp, rbp";
-				say "\tpop rbp";
+				emitt 'mov rsp, rbp';
+				emitt 'pop rbp';
 			}
-			say "\tret";
+			emitt 'ret';
 		} elsif($op == 0x10) { # call
 			my $func = take_num(1);
 			my $type = $FTYPE[$func]{type};
 			my $fname = $func < @FIMPORTS ? $FIMPORTS[$func]{'name'} . ' wrt ..plt' : ($EXPORT[$func]{name} // 'wasm_func_' . $func);
-			say "\t;; call $func ($fname): " . arglist($type->{par}->@*) . " -> " . arglist($type->{res}->@*);
+			emitt ";; call $func ($fname): " . arglist($type->{par}->@*) . " -> " . arglist($type->{res}->@*);
 			gen_call($type, $fname);
 		} elsif($op == 0x11) { # call_indirect
+			$need_got = 1;
 			my $typeidx = take_num(1);
 			my $tableidx = take_num(1);
 			my $type = $TYPE[$typeidx];
-			say "\t;; call_indirect $tableidx $typeidx: " . arglist($type->{par}->@*) . " -> " . arglist($type->{res}->@*);
-			say "\tpop rax";
-			say "\tmov rbx, _GLOBAL_OFFSET_TABLE_";
-			say "\tmov rbx, [rbx + rax*8 + wasm_table_$tableidx wrt ..got]";
+			emitt ";; call_indirect $tableidx $typeidx: " . arglist($type->{par}->@*) . " -> " . arglist($type->{res}->@*);
+			emitt 'pop rax';
+			emitt 'mov rbx, _GLOBAL_OFFSET_TABLE_';
+			emitt "mov rbx, [rbx + wasm_table_$tableidx wrt ..got]";
+			emitt 'mov rbx, [rbx + rax * 8]';
 			# say "\tmov rdi, [wasm_table_$tableidx + rax * 8]";
 			# say "\tmov rbx, [rbx + rax * 8]";
 			gen_call($type, 'rbx');
@@ -485,7 +476,7 @@ sub parse_code($findex, $fname, $locals) {
 			}
 			$_ = $opcode->{name};
 			s/\\(\d)/$args[$1]/xg;
-			say "\t;; $_";
+			emitt ";; $_";
 			my $maxlblid = 0;
 			for ($opcode->{code}->@*) {
 				my $o = $_;
@@ -497,7 +488,7 @@ sub parse_code($findex, $fname, $locals) {
 					$maxlblid = max($lblid, $1);
 					".${fname}_label_$lblid";
 				/e;
-				say (/^@/ ? "$o:" : "\t$o");
+				emit (/^@/ ? "$o:" : "\t$o");
 			}
 			$lblgid += $maxlblid;
 		} else {
@@ -569,7 +560,7 @@ sub parse_code_section() {
 	my $nimports = scalar @FIMPORTS;
 	for(my $i = $nimports; $i < $nfunc + $nimports; $i++) {
 		my $fname = ($EXPORT[$i]{name} // "wasm_func_$i");
-		say "$fname:";
+		emit "$fname:";
 		my $size = take_num(1);
 		my $nlocals = take_num(1);
 		my @locals;
@@ -647,11 +638,8 @@ sub parse_opcode($op, $emit = sub { say @_ }) {
 	my @args;
 	if($opcode->{args}) {
 		for ($opcode->{args}->@*) {
-			if(TINT($_)) {
-				push @args, take_num();
-			} else {
-				die "Unsupported argument type";
-			}
+			die "Unsupported argument type $_" unless TINT($_);
+			push @args, take_num();
 		}
 	}
 	$_ = $opcode->{name};
@@ -731,11 +719,10 @@ sub parse_data_section() {
 		my $kind = take_num(1);
 		die "Data segment kind $kind is not supported" unless $kind == 0;
 		my $init = '';
-		my $emit = sub { $init .= "$_[0]\n" };
 		while($CODE) {
 			my $op = take_byte();
 			last if $op == 0x0b;
-			parse_opcode($op, $emit);
+			parse_opcode($op, sub { $init .= "$_[0]\n" });
 		}
 		my @bytes = take_lparr_byte();
 		my $seg = { init => $init, bytes => \@bytes };
@@ -745,7 +732,7 @@ sub parse_data_section() {
 }
 
 if($RUNTIME eq 'test42') {
-	say <<EOF
+	emitl <<EOF
 section .text
 	default rel
 	global main
@@ -756,7 +743,7 @@ main:
 	call init_globals
 	call init_data_segments
 	call init_tables
-	call wasm_func_main
+	call test
 	mov rsi, rax
 	mov rdi, fmt
 	xor rax, rax
@@ -767,15 +754,13 @@ main:
 EOF
 ;
 } elsif($RUNTIME eq 'pvf') {
-	say <<EOF
+	emitl <<EOF
 section .text
 	default rel
 	global init_pvf:function
 	global validate_block:function
 	global __heap_base
-	global wasm_table_0
 	extern ext_logging_log_version_1
-	extern _GLOBAL_OFFSET_TABLE_
 
 init_pvf:
 	push rbp
@@ -820,90 +805,102 @@ while($CODE) {
 	}
 }
 
-say 'init_globals:';
+emit 'init_globals:';
 
 if(@GLOBALS) {
 	for my $i (0..$#GLOBALS) {
 		my $global = $GLOBALS[$i];
-		say $global->{init};
-		say "\tpop rax";
-		say "\tmov [" . ($global->{name} // "wasm_global_$i") . "], rax";
+		emit $global->{init};
+		emitt 'pop rax';
+		emitt "mov [" . ($global->{name} // "wasm_global_$i") . "], rax";
 	}
 }
 
-say "\tret";
+emitt 'ret';
 
-say 'init_data_segments:';
+emit 'init_data_segments:';
 
 if(@DATASEG) {
+	$need_got = 1;
 	for my $i (0..$#DATASEG) {
 		my $seg = $DATASEG[$i];
-		say $seg->{init};
-		say "\tpop rdi";
-		say "\tmov rax, _GLOBAL_OFFSET_TABLE_";
-		say "\tmov rax, [rax + memory wrt ..got]";
-		say "\tadd rdi, rax";
-		say "\tmov rsi, data_segment_$i";
-		say "\tmov rcx, " . scalar($seg->{bytes}->@*);
-		say "\trep movsb";
+		emitl $seg->{init};
+		emitt 'pop rdi';
+		emitt 'mov rax, _GLOBAL_OFFSET_TABLE_';
+		emitt 'mov rax, [rax + memory wrt ..got]';
+		emitt 'add rdi, rax';
+		emitt "mov rsi, data_segment_$i";
+		emitt "mov rcx, " . scalar($seg->{bytes}->@*);
+		emitt 'rep movsb';
 	}
 }
 
-say "\tret";
+emitt 'ret';
 
-say 'init_tables:';
+emit 'init_tables:';
 
 if(@ELEMENTS) {
+	$need_got = 1;
 	for my $i (0..$#ELEMENTS) {
 		my $elem = $ELEMENTS[$i];
 		if($elem->{type} eq 'funcref') {
-			say $elem->{init_offset};
-			say "\tpop rax";
-			say "\tcld";
-			say "\tmov rbx, _GLOBAL_OFFSET_TABLE_";
-			say "\tmov rbx, [rbx + wasm_table_$elem->{tableidx} wrt ..got]";
-			say "\tlea rdi, [rbx + rax * 8]";
+			emitl $elem->{init_offset};
+			emitt 'pop rax';
+			emitt 'cld';
+			emitt 'mov rbx, _GLOBAL_OFFSET_TABLE_';
+			emitt "mov rbx, [rbx + wasm_table_$elem->{tableidx} wrt ..got]";
+			emitt 'lea rdi, [rbx + rax * 8]';
 			for my $ref ($elem->{funcref}->@*) {
-				say "\tlea rax, [" . ($EXPORT[$ref]{name} // "wasm_func_$ref") . ']';
-				say "\tstosq";
+				emitt "lea rax, [" . ($EXPORT[$ref]{name} // "wasm_func_$ref") . ']';
+				emitt 'stosq';
 			}
 		}
 	}
 }
 
-say "\tret";
+emitt 'ret';
 
-say 'section .data';
+emit 'section .data';
 
 if($RUNTIME eq 'test42') {
-	say 'fmt: db "%d", 10, 0';
+	emit 'fmt: db "%d", 10, 0';
 }
 
 if(@GLOBALS) {
-	say "\talign 16";
+	emitt 'align 16';
 	for my $i (0..$#GLOBALS) {
-		say "\t" . ($GLOBALS[$i]{name} // "wasm_global_$i") . ": dq 0";
+		emit (($GLOBALS[$i]{name} // "wasm_global_$i") . ": dq 0");
 	}
 }
 
 if(@DATASEG) {
 	for my $i (0..$#DATASEG) {
-		say "\tdata_segment_$i: db " . join(", ", $DATASEG[$i]{bytes}->@*)
+		emit "data_segment_$i: db " . join(", ", $DATASEG[$i]{bytes}->@*)
 	}
 }
 
+my $has_table;
+
 if(@TABLES) {
+	my $has_table = 1;
 	for my $ti (0..$#TABLES) {
 		my $table = $TABLES[$ti];
 		my $mintable = $table->{min};
-		say "\talign 16";
-		say "\twasm_table_$ti: times $mintable dq 0"; # FIXME: Only funcref tables are implemented!
+		emitt 'align 16';
+		emit "wasm_table_$ti: times $mintable dq 0"; # FIXME: Only funcref tables are implemented!
+		emitt "global wasm_table_$ti";
 	}
 }
 
 if($MEM) {
 	my $minmem = $MEM->{min} * 65536;
-	say "\talign 16";
-	say "\tmemory: times $minmem db 0";
-	say "\tglobal memory";
+	emitt 'align 16';
+	emitt "memory: times $minmem db 0";
+	emitt 'global memory';
 }
+
+if($need_got) {
+	splice @EMIT, 2, 0, "\textern _GLOBAL_OFFSET_TABLE_";
+}
+
+say $_ for @EMIT;

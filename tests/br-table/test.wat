@@ -1,5 +1,5 @@
 (module
-  (func (export "main") (result i32)
+  (func (export "test") (result i32)
     block $b3 (result i32)
       block $b2 (result i32)
         block $b1 (result i32)

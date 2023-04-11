@@ -3,7 +3,7 @@
   (func $fuckup
     unreachable
   )
-  (func (export "main") (result i32)
+  (func (export "test") (result i32)
     (i64.eq (i64.div_s (i64.const 10) (i64.const 3)) (i64.const 3))
     call_indirect 1
 

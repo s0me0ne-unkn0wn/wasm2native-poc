@@ -1,5 +1,5 @@
 (module
-  (func (export "main") (result i32)
+  (func (export "test") (result i32)
     (local i32)
     i32.const 6
     local.tee 0

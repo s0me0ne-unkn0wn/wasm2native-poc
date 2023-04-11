@@ -8,7 +8,7 @@
 	(func $fn3 (result i32)
 		i32.const 43
 	)
-	(func (export "main") (result i32)
+	(func (export "test") (result i32)
 		i32.const 2
 		call_indirect (type 0)
 	)

@@ -4,7 +4,7 @@
 		local.get 1
 		i32.sub
 	)
-	(func (export "main") (result i32)
+	(func (export "test") (result i32)
 		i32.const 50
 		i32.const 8
 		call $sub

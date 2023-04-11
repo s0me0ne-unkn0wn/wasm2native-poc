@@ -1,5 +1,5 @@
 (module
-	(func (export "main") (result i32)
+	(func (export "test") (result i32)
 		block (result i32)
 			i32.const 39
 			i32.const 40

@@ -1,5 +1,5 @@
 (module
-  (func (export "main")
+  (func (export "test")
         (result i32)
     i32.const 0
     i32.const 0xAABBCC2A
