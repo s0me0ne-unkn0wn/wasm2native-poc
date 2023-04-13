@@ -109,16 +109,15 @@ sub parse_exports_section() {
 	}
 }
 
-my $need_got = 0;
+# my $need_got = 0;
 
 sub op_mem_load($ext, $reg, $width) {
-	$need_got = 1;
+	# $need_got = 1;
 	[
 		'pop rsi',
-		# 'add rsi, memory + \1',
-		'mov rax, _GLOBAL_OFFSET_TABLE_',
-		'mov rax, [rax + memory wrt ..got]',
-		# 'mov rax, memory wrt ..got',
+		# 'mov rax, _GLOBAL_OFFSET_TABLE_',
+		# 'mov rax, [rax + memory wrt ..got]',
+		'lea rax, [rel memory]',
 		"mov$ext ${reg}ax, $width [rsi + rax + \\1]",
 		'push rax',
 	]
@@ -127,13 +126,13 @@ sub op_mem_load($ext, $reg, $width) {
 my %op_mem_store_regs = (byte => 'al', word => 'ax', dword => 'eax', qword => 'rax');
 
 sub op_mem_store($width) {
-	$need_got = 1;
+	# $need_got = 1;
 	[
 		'pop rax',
 		'pop rdi',
-		# 'add rdi, memory + \1',
-		'mov rbx, _GLOBAL_OFFSET_TABLE_',
-		'mov rbx, [rbx + memory wrt ..got]',
+		# 'mov rbx, _GLOBAL_OFFSET_TABLE_',
+		# 'mov rbx, [rbx + memory wrt ..got]',
+		'lea rbx, [rel memory]',
 		"mov $width [rdi + rbx + \\1], $op_mem_store_regs{$width}",
 	]	
 }
@@ -449,14 +448,15 @@ sub parse_code($findex, $fname, $locals) {
 			emitt ";; call $func ($fname): " . arglist($type->{par}->@*) . " -> " . arglist($type->{res}->@*);
 			gen_call($type, $fname);
 		} elsif($op == 0x11) { # call_indirect
-			$need_got = 1;
+			# $need_got = 1;
 			my $typeidx = take_num(1);
 			my $tableidx = take_num(1);
 			my $type = $TYPE[$typeidx];
 			emitt ";; call_indirect $tableidx $typeidx: " . arglist($type->{par}->@*) . " -> " . arglist($type->{res}->@*);
 			emitt 'pop rax';
-			emitt 'mov rbx, _GLOBAL_OFFSET_TABLE_';
-			emitt "mov rbx, [rbx + wasm_table_$tableidx wrt ..got]";
+			# emitt 'mov rbx, _GLOBAL_OFFSET_TABLE_';
+			# emitt "mov rbx, [rbx + wasm_table_$tableidx wrt ..got]";
+			emitt "lea rbx, [rel wasm_table_$tableidx]";
 			emitt 'mov rbx, [rbx + rax * 8]';
 			# say "\tmov rdi, [wasm_table_$tableidx + rax * 8]";
 			# say "\tmov rbx, [rbx + rax * 8]";
@@ -821,16 +821,18 @@ emitt 'ret';
 emit 'init_data_segments:';
 
 if(@DATASEG) {
-	$need_got = 1;
+	# $need_got = 1;
 	for my $i (0..$#DATASEG) {
 		my $seg = $DATASEG[$i];
 		emitl $seg->{init};
 		emitt 'pop rdi';
-		emitt 'mov rax, _GLOBAL_OFFSET_TABLE_';
-		emitt 'mov rax, [rax + memory wrt ..got]';
+		# emitt 'mov rax, _GLOBAL_OFFSET_TABLE_';
+		# emitt 'mov rax, [rax + memory wrt ..got]';
+		emitt 'lea rax, [rel memory]';
 		emitt 'add rdi, rax';
 		emitt "mov rsi, data_segment_$i";
 		emitt "mov rcx, " . scalar($seg->{bytes}->@*);
+		emitt 'cld';
 		emitt 'rep movsb';
 	}
 }
@@ -840,15 +842,16 @@ emitt 'ret';
 emit 'init_tables:';
 
 if(@ELEMENTS) {
-	$need_got = 1;
+	# $need_got = 1;
 	for my $i (0..$#ELEMENTS) {
 		my $elem = $ELEMENTS[$i];
 		if($elem->{type} eq 'funcref') {
 			emitl $elem->{init_offset};
 			emitt 'pop rax';
 			emitt 'cld';
-			emitt 'mov rbx, _GLOBAL_OFFSET_TABLE_';
-			emitt "mov rbx, [rbx + wasm_table_$elem->{tableidx} wrt ..got]";
+			# emitt 'mov rbx, _GLOBAL_OFFSET_TABLE_';
+			# emitt "mov rbx, [rbx + wasm_table_$elem->{tableidx} wrt ..got]";
+			emitt "lea rbx, [rel wasm_table_$elem->{tableidx}]";
 			emitt 'lea rdi, [rbx + rax * 8]';
 			for my $ref ($elem->{funcref}->@*) {
 				emitt "lea rax, [" . ($EXPORT[$ref]{name} // "wasm_func_$ref") . ']';
@@ -879,8 +882,6 @@ if(@DATASEG) {
 	}
 }
 
-my $has_table;
-
 if(@TABLES) {
 	my $has_table = 1;
 	for my $ti (0..$#TABLES) {
@@ -899,8 +900,8 @@ if($MEM) {
 	emitt 'global memory';
 }
 
-if($need_got) {
-	splice @EMIT, 2, 0, "\textern _GLOBAL_OFFSET_TABLE_";
-}
+# if($need_got) {
+# 	splice @EMIT, 2, 0, "\textern _GLOBAL_OFFSET_TABLE_";
+# }
 
 say $_ for @EMIT;
