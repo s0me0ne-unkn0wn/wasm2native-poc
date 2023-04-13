@@ -8,6 +8,9 @@
 *.bs
 *.S
 *.wasm
+tests/*/test
+adder-test
+adder.so
 
 # Devel::Cover
 cover_db/

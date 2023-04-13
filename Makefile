@@ -1,21 +1,18 @@
-all: test
+all: adder-test adder.so
 
-#wrt0.o: wrt0.S
-#	nasm -O0 -g -f elf64 -o wrt0.o wrt0.S
+adder-test: adder-test.c
+	gcc -rdynamic -ggdb -o adder-test adder-test.c
 
-test.wasm: test.wat
-	wat2wasm test.wat
+adder.so: adder.o
+	ld -shared -o adder.so adder.o
 
-test.S: wasm2native.pl test.wasm
-	./wasm2native.pl test.wasm >test.S
+adder.o: adder.S
+	nasm -O0 -g -f elf64 -o adder.o adder.S
 
-test.o: test.S
-	nasm -O0 -g -f elf64 -o test.o test.S
-
-test: test.o
-	gcc -g -no-pie -o test ./test.o -lc
+adder.S: wasm2native.pl test_parachain_adder.wasm
+	./wasm2native.pl --runtime=pvf test_parachain_adder.wasm >adder.S
 
 clean:
-	rm -f wrt0.o test.o test.S test
+	rm -f adder.so adder.o adder.S adder-test
 
 .PHONY: all clean
