@@ -176,7 +176,19 @@ my %OPCODE = (
 	0x37 => { name => 'i64.store align=\0 offset=\1', args => [ TU32, TU32 ], code => op_mem_store('qword') },
 	0x3a => { name => 'i32.store8 align=\0 offset=\1', args => [ TU32, TU32 ], code => op_mem_store('byte') },
 	0x3b => { name => 'i32.store16 align=\0 offset=\1', args => [ TU32, TU32 ], code => op_mem_store('word') },
-	0x40 => { name => 'memory.grow', code => [ 'mov rax, -1', 'mov [rsp], rax' ] }, # FIXME: Stub
+	0x40 => { name => 'memory.grow \0', args => [ TU32 ], code => [
+		'pop rbx',
+		'mov rax, [rel mem_alloc_pages]',
+		'add rbx, rax',
+		'cmp rbx, [rel mem_max_pages]',
+		'ja @0',
+		'mov [rel mem_alloc_pages], rbx',
+		'jmp @1',
+		'@0',
+		'mov rax, -1',
+		'@1',
+		'push rax',
+	]},
 	0x41 => { name => 'i32.const \0', args => [ TI32 ], code => [ 'mov eax, \0', 'push rax' ] }, # FIXME: Should be sign-extended or not?
 	0x42 => { name => 'i64.const \0', args => [ TI64 ], code => [ 'mov rax, \0', 'push rax' ] },
 	0x45 => { name => 'i32.eqz', code => [
@@ -894,7 +906,14 @@ if(@TABLES) {
 }
 
 if($MEM) {
-	my $minmem = $MEM->{min} * 65536;
+	my $minmem = $MEM->{min} << 16;
+	my $maxpages = $MEM->{max} // ($MEM->{min} + 128);
+	my $maxmem = $maxpages << 16;
+
+	emitt 'align 16';
+	emitt "mem_alloc_pages: dq $MEM->{min}";
+	emitt "mem_max_pages: dq $maxpages";
+
 	emitt 'align 16';
 	emitt "memory: times $minmem db 0";
 	emitt 'global memory';
