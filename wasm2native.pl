@@ -221,8 +221,8 @@ my %OPCODE = (
 	0x5a => { name => 'i64.ge_u', code => op_cmp('ae', 'r') },
 	0x67 => { name => 'i32.clz', code => [ 'pop rax', 'lzcnt eax, eax', 'push rax' ]},
 	0x68 => { name => 'i32.ctz', code => [ 'pop rax', 'tzcnt eax, eax', 'push rax' ]},
-	0x6a => { name => 'i32.add', code => [ 'pop rax', 'add [rsp], rax' ] },
-	0x6b => { name => 'i32.sub', code => [ 'pop rax', 'sub [rsp], rax' ] },
+	0x6a => { name => 'i32.add', code => [ 'pop rax', 'pop rbx', 'add eax, ebx', 'push rax' ] },
+	0x6b => { name => 'i32.sub', code => [ 'pop rbx', 'pop rax', 'sub eax, ebx', 'push rax' ] },
 	0x6c => { name => 'i32.mul', code => [ 'pop rax', 'pop rbx', 'imul ebx', 'push rax' ] },
 	0x6e => { name => 'i32.div_u', code => [
 		'pop rbx',
@@ -231,9 +231,9 @@ my %OPCODE = (
 		'div ebx',
 		'push rax',
 	]},
-	0x71 => { name => 'i32.and', code => [ 'pop rax', 'and [rsp], rax' ] },
-	0x72 => { name => 'i32.or', code => [ 'pop rax', 'or [rsp], rax' ] },
-	0x73 => { name => 'i32.xor', code => [ 'pop rax', 'xor [rsp], rax' ] },
+	0x71 => { name => 'i32.and', code => [ 'pop rax', 'pop rbx', 'and eax, ebx', 'push rax' ] },
+	0x72 => { name => 'i32.or', code =>  [ 'pop rax', 'pop rbx', 'or eax, ebx', 'push rax' ] },
+	0x73 => { name => 'i32.xor', code => [ 'pop rax', 'pop rbx', 'xor eax, ebx', 'push rax' ] },
 	0x74 => { name => 'i32.shl', code => [ 'pop rcx', 'pop rax', 'shl eax, cl', 'push rax' ] },
 	0x76 => { name => 'i32.shr_u', code => [ 'pop rcx', 'pop rax', 'shr eax, cl', 'push rax' ] },
 	0x77 => { name => 'i32.rotl', code => [ 'pop rcx', 'pop rax', 'rol eax, cl', 'push rax' ] },
@@ -337,7 +337,7 @@ sub parse_code($findex, $fname, $locals) {
 	# persist anyway, but that would ruin stack usage determinism across platforms
 	for (1..$nstack_params) {
 		emitt "mov rax, [rbp+$caller_offset]";
-		emitt "\tmov [rbp-$frame_offset], rax";
+		emitt "mov [rbp-$frame_offset], rax";
 		$localmap[$localidx++] = "r10-$frame_offset";
 		$frame_offset += 8;
 		$caller_offset += 8;
@@ -363,7 +363,7 @@ sub parse_code($findex, $fname, $locals) {
 			emitt 'mov rbp, rsp';
 			emit ".${fname}_label_loop_${blkid}_branch_target:";
 		} elsif($op == 0x0b) { # end
-			say "\t;; end";
+			emitt ";; end";
 			if(@frames) {
 				my $frame = shift @frames;
 				if($frame->{type} ne 'func') {
@@ -915,7 +915,7 @@ if($MEM) {
 	emitt "mem_max_pages: dq $maxpages";
 
 	emitt 'align 16';
-	emitt "memory: times $minmem db 0";
+	emitt "memory: times $maxmem db 0";
 	emitt 'global memory';
 }
 
