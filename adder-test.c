@@ -6,7 +6,8 @@
 #include <dlfcn.h>
 #include <sys/types.h>
 
-unsigned char *memory;
+static unsigned char *memory;
+static const char *levels = "0123456";
 
 void ext_logging_log_version_1(uint32_t level, uint64_t target_p, uint64_t message_p) {
 	uint32_t target_len = (target_p >> 32);
@@ -14,7 +15,17 @@ void ext_logging_log_version_1(uint32_t level, uint64_t target_p, uint64_t messa
 	uint32_t message_len = (message_p >> 32);
 	message_p &= 0xFFFFFFFF;
 
-	printf("L%u: [%.*s] %.*s\n", level, target_len, memory + target_p, message_len, memory + message_p);
+	// Poor man's printf to avoid the neccessity of stack alignment for now
+	putchar('L');
+	putchar(levels[level]);
+	putchar(':');
+	putchar(' ');
+	putchar('[');
+	for(int i = 0; i < target_len; i++) putchar(*(memory + target_p + i));
+	putchar(']');
+	putchar(' ');
+	for(int i = 0; i < message_len; i++) putchar(*(memory + message_p + i));
+	putchar('\n');
 }
 
 int main(int argc, char **argv) {

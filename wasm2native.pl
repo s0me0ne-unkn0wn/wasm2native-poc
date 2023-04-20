@@ -109,14 +109,9 @@ sub parse_exports_section() {
 	}
 }
 
-# my $need_got = 0;
-
 sub op_mem_load($ext, $reg, $width) {
-	# $need_got = 1;
 	[
 		'pop rsi',
-		# 'mov rax, _GLOBAL_OFFSET_TABLE_',
-		# 'mov rax, [rax + memory wrt ..got]',
 		'lea rax, [rel memory]',
 		"mov$ext ${reg}ax, $width [rsi + rax + \\1]",
 		'push rax',
@@ -126,12 +121,9 @@ sub op_mem_load($ext, $reg, $width) {
 my %op_mem_store_regs = (byte => 'al', word => 'ax', dword => 'eax', qword => 'rax');
 
 sub op_mem_store($width) {
-	# $need_got = 1;
 	[
 		'pop rax',
 		'pop rdi',
-		# 'mov rbx, _GLOBAL_OFFSET_TABLE_',
-		# 'mov rbx, [rbx + memory wrt ..got]',
 		'lea rbx, [rel memory]',
 		"mov $width [rdi + rbx + \\1], $op_mem_store_regs{$width}",
 	]	
@@ -143,15 +135,20 @@ sub op_cmp($cond, $reg) {
 		'pop rax',
 		"cmp ${reg}ax, ${reg}bx",
 		"set$cond al",
-		'movzx rax, al',
+		'movzx eax, al',
 		'push rax',
 	]
 }
+
+# All the values are kept on stack as 64-bit. All the i32 values are zero-extended before putting them on stack.
 
 my %OPCODE = (
 	0x00 => { name => 'unreachable', code => [ 'ud2' ] },
 	0x01 => { name => 'nop', code => [ 'nop' ] },
 	0x1a => { name => 'drop', code => [ 'add rsp, 8'] },
+
+	# Both rax and rbx, if they were i32 values, were zero-extended when putting them on stack, so omitting
+	# zero-extension when pushing the result is safe.
 	0x1b => { name => 'select', code => [
 		'pop rcx',
 		'pop rax',
@@ -160,17 +157,21 @@ my %OPCODE = (
 		'cmovnz rax, rbx',
 		'push rax',
 	]},
+
+	# All the local and global values were stack values before they were put into memory, so they were
+	# zero-extended when were put on stack, so we don't zero-extend them explicitly.
 	0x20 => { name => 'local.get \0', args => [ TU32 ], code => [ 'push qword [%0]' ] },
 	0x21 => { name => 'local.set \0', args => [ TU32 ], code => [ 'pop rax', 'mov [%0], rax' ] },
 	0x22 => { name => 'local.tee \0', args => [ TU32 ], code => [ 'mov rax, [rsp]',	'mov [%0], rax'	]},
 	0x23 => { name => 'global.get \0', args => [ TU32 ], code => [ 'push qword [^0]']},
 	0x24 => { name => 'global.set \0', args => [ TU32 ], code => [ 'pop rax', 'mov [^0], rax']},
-	0x28 => { name => 'i32.load align=\0 offset=\1', args => [ TU32, TU32 ], code => op_mem_load('sx', 'r', 'dword') },
+
+	0x28 => { name => 'i32.load align=\0 offset=\1', args => [ TU32, TU32 ], code => op_mem_load('', 'e', 'dword') },
 	0x29 => { name => 'i64.load align=\0 offset=\1', args => [ TU32, TU32 ], code => op_mem_load('', 'r', 'qword') },
-	0x2c => { name => 'i32.load8_s align=\0 offset=\1', args => [ TU32, TU32 ], code => op_mem_load('sx', 'r', 'byte') },
-	0x2d => { name => 'i32.load8_u align=\0 offset=\1', args => [ TU32, TU32 ], code => op_mem_load('zx', 'r', 'byte') },
-	0x2f => { name => 'i32.load16_u align=\0 offset=\1', args => [ TU32, TU32 ], code => op_mem_load('zx', 'r', 'word') },
-	0x31 => { name => 'i64.load8_u align=\0 offset=\1', args => [ TU32, TU32 ], code => op_mem_load('zx', 'r', 'byte') },
+	0x2c => { name => 'i32.load8_s align=\0 offset=\1', args => [ TU32, TU32 ], code => op_mem_load('sx', 'e', 'byte') },
+	0x2d => { name => 'i32.load8_u align=\0 offset=\1', args => [ TU32, TU32 ], code => op_mem_load('zx', 'e', 'byte') },
+	0x2f => { name => 'i32.load16_u align=\0 offset=\1', args => [ TU32, TU32 ], code => op_mem_load('zx', 'e', 'word') },
+	0x31 => { name => 'i64.load8_u align=\0 offset=\1', args => [ TU32, TU32 ], code => op_mem_load('zx', 'e', 'byte') }, # Writing to eax zero-extends to rax by itself
 	0x35 => { name => 'i64.load32_u align=\0 offset=\1', args => [ TU32, TU32 ], code => op_mem_load('', 'e', 'dword') },
 	0x36 => { name => 'i32.store align=\0 offset=\1', args => [ TU32, TU32 ], code => op_mem_store('dword') },
 	0x37 => { name => 'i64.store align=\0 offset=\1', args => [ TU32, TU32 ], code => op_mem_store('qword') },
@@ -189,13 +190,13 @@ my %OPCODE = (
 		'@1',
 		'push rax',
 	]},
-	0x41 => { name => 'i32.const \0', args => [ TI32 ], code => [ 'mov eax, \0', 'push rax' ] }, # FIXME: Should be sign-extended or not?
+	0x41 => { name => 'i32.const \0', args => [ TI32 ], code => [ 'mov eax, \0', 'push rax' ] },
 	0x42 => { name => 'i64.const \0', args => [ TI64 ], code => [ 'mov rax, \0', 'push rax' ] },
 	0x45 => { name => 'i32.eqz', code => [
 		'pop rax',
 		'test eax, eax',
 		'sete al',
-		'movzx rax, al', # FIXME: Is it safe to omit REX.W here and everywhere?
+		'movzx eax, al',
 		'push rax',
 	]},
 	0x46 => { name => 'i32.eq', code => op_cmp('e', 'e') },
@@ -211,7 +212,7 @@ my %OPCODE = (
 		'pop rax',
 		'test rax, rax',
 		'sete al',
-		'movzx rax, al',
+		'movzx eax, al', # It's either 0 or 1 and zero-extends to 64-bit when writing to rax, so no REX.W needed
 		'push rax',
 	]},
 	0x51 => { name => 'i64.eq', code => op_cmp('e', 'r') },
@@ -231,9 +232,13 @@ my %OPCODE = (
 		'div ebx',
 		'push rax',
 	]},
-	0x71 => { name => 'i32.and', code => [ 'pop rax', 'pop rbx', 'and eax, ebx', 'push rax' ] },
-	0x72 => { name => 'i32.or', code =>  [ 'pop rax', 'pop rbx', 'or eax, ebx', 'push rax' ] },
-	0x73 => { name => 'i32.xor', code => [ 'pop rax', 'pop rbx', 'xor eax, ebx', 'push rax' ] },
+
+	# Logical operations are commutative and values are guaranteed to be zero-extended when put on stack;
+	# op(0, 0) is always 0 for and, or and xor, so it is safe to operate on 64-bit values directly
+	0x71 => { name => 'i32.and', code => [ 'pop rax', 'and qword [rsp], rax' ] },
+	0x72 => { name => 'i32.or', code =>  [ 'pop rax', 'or qword [rsp], rax' ] },
+	0x73 => { name => 'i32.xor', code => [ 'pop rax', 'xor qword [rsp], rax' ] },
+
 	0x74 => { name => 'i32.shl', code => [ 'pop rcx', 'pop rax', 'shl eax, cl', 'push rax' ] },
 	0x76 => { name => 'i32.shr_u', code => [ 'pop rcx', 'pop rax', 'shr eax, cl', 'push rax' ] },
 	0x77 => { name => 'i32.rotl', code => [ 'pop rcx', 'pop rax', 'rol eax, cl', 'push rax' ] },
@@ -258,8 +263,8 @@ my %OPCODE = (
 	0x85 => { name => 'i64.xor', code => [ 'pop rax', 'xor [rsp], rax' ] },
 	0x86 => { name => 'i64.shl', code => [ 'pop rcx', 'pop rax', 'shl rax, cl', 'push rax' ] },
 	0x89 => { name => 'i64.rotl', code => [ 'pop rcx', 'pop rax', 'rol rax, cl', 'push rax' ] },
-	0xa7 => { name => 'i32.wrap_i64', code => [ 'pop rax', 'mov eax, eax', 'push rax' ]},
-	0xad => { name => 'i64.extend_i32_u', code => [ 'pop rax', 'mov eax, eax', 'push rax' ]},
+	0xa7 => { name => 'i32.wrap_i64', code => [ 'pop rax', 'mov eax, eax', 'push rax' ] },
+	0xad => { name => 'i64.extend_i32_u', code => [] }, # It's nop, as i32 value is already zero-extended on stack
 );
 
 sub parse_code($findex, $fname, $locals) {
@@ -307,7 +312,8 @@ sub parse_code($findex, $fname, $locals) {
 	emitt 'mov rbp, rsp'; # Block frame
 	emitt 'mov r10, rsp'; # Function frame
 	# Function call must obey SysV ABI as exported and imported functions use it to communicate
-	# with the outer world
+	# with the outer world.
+	# FIXME: Stack alignment rule is not implemented yet.
 	my $type = $FTYPE[$findex]{type};
 	l "Type: " . arglist($type->{par}->@*) . ' -> ' . arglist($type->{res}->@*);
 
@@ -398,7 +404,7 @@ sub parse_code($findex, $fname, $locals) {
 			my $tframe = $frames[$target];
 			my $lblid = $lblgid++;
 			emitt 'pop rax';
-			emitt 'test rax, rax';
+			emitt 'test eax, eax';
 			emitt "jz .${fname}_label_br_else_$lblid";
 
 			# Same as br
@@ -418,14 +424,14 @@ sub parse_code($findex, $fname, $locals) {
 			emitt ";; br_table " . np(@brtable) . " $default_target";
 			my $lblid = $lblgid++;
 			emitt 'pop rcx'; # Jump target index
-			emitt "mov rbx, $#brtable"; # The last element is the default one
-			emitt 'cmp rcx, rbx'; 
-			emitt 'cmova rcx, rbx'; # Use default index if overflowed
+			emitt "mov ebx, $#brtable"; # The last element is the default one
+			emitt 'cmp ecx, ebx'; 
+			emitt 'cmova ecx, ebx'; # Use default index if overflowed
 
 			emitt 'pop rax' if TINT($default_frame->{rtype});  # All the branch targets share the same type
 
 			emitt "lea rbx, [rel .br_table_$lblid]";
-			emitt 'shl rcx, 3';
+			emitt 'shl ecx, 3';
 			emitt 'add rbx, rcx';
 			emitt 'jmp [rbx]';
 
@@ -460,18 +466,13 @@ sub parse_code($findex, $fname, $locals) {
 			emitt ";; call $func ($fname): " . arglist($type->{par}->@*) . " -> " . arglist($type->{res}->@*);
 			gen_call($type, $fname);
 		} elsif($op == 0x11) { # call_indirect
-			# $need_got = 1;
 			my $typeidx = take_num(1);
 			my $tableidx = take_num(1);
 			my $type = $TYPE[$typeidx];
 			emitt ";; call_indirect $tableidx $typeidx: " . arglist($type->{par}->@*) . " -> " . arglist($type->{res}->@*);
 			emitt 'pop rax';
-			# emitt 'mov rbx, _GLOBAL_OFFSET_TABLE_';
-			# emitt "mov rbx, [rbx + wasm_table_$tableidx wrt ..got]";
 			emitt "lea rbx, [rel wasm_table_$tableidx]";
 			emitt 'mov rbx, [rbx + rax * 8]';
-			# say "\tmov rdi, [wasm_table_$tableidx + rax * 8]";
-			# say "\tmov rbx, [rbx + rax * 8]";
 			gen_call($type, 'rbx');
 		} elsif(my $opcode = $OPCODE{$op}) {
 			my @args;
@@ -838,8 +839,6 @@ if(@DATASEG) {
 		my $seg = $DATASEG[$i];
 		emitl $seg->{init};
 		emitt 'pop rdi';
-		# emitt 'mov rax, _GLOBAL_OFFSET_TABLE_';
-		# emitt 'mov rax, [rax + memory wrt ..got]';
 		emitt 'lea rax, [rel memory]';
 		emitt 'add rdi, rax';
 		emitt "mov rsi, data_segment_$i";
@@ -861,8 +860,6 @@ if(@ELEMENTS) {
 			emitl $elem->{init_offset};
 			emitt 'pop rax';
 			emitt 'cld';
-			# emitt 'mov rbx, _GLOBAL_OFFSET_TABLE_';
-			# emitt "mov rbx, [rbx + wasm_table_$elem->{tableidx} wrt ..got]";
 			emitt "lea rbx, [rel wasm_table_$elem->{tableidx}]";
 			emitt 'lea rdi, [rbx + rax * 8]';
 			for my $ref ($elem->{funcref}->@*) {
@@ -918,9 +915,5 @@ if($MEM) {
 	emitt "memory: times $maxmem db 0";
 	emitt 'global memory';
 }
-
-# if($need_got) {
-# 	splice @EMIT, 2, 0, "\textern _GLOBAL_OFFSET_TABLE_";
-# }
 
 say $_ for @EMIT;
