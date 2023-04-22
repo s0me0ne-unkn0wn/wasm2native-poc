@@ -1,0 +1,15 @@
+[package]
+name = "adder-test-rs"
+version = "0.1.0"
+edition = "2021"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
+parity-scale-codec = "3.4.0"
+dlopen = "0.1.8"
+dlopen_derive = "0.1.4"
+
+polkadot-parachain = { git = "https://github.com/paritytech/polkadot", branch = "master" }
+polkadot-primitives = { git = "https://github.com/paritytech/polkadot", branch = "master" }
+adder = { package = "test-parachain-adder", git = "https://github.com/paritytech/polkadot", branch = "master" }

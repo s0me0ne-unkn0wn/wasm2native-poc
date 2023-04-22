@@ -12,6 +12,11 @@ tests/*/test
 adder-test
 adder.so
 
+# Rust
+**/target/
+**/*.rs.bk
+*.swp
+
 # Devel::Cover
 cover_db/
 
