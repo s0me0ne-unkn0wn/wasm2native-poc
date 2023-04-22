@@ -212,7 +212,7 @@ my %OPCODE = (
 		'pop rax',
 		'test rax, rax',
 		'sete al',
-		'movzx eax, al', # It's either 0 or 1 and zero-extends to 64-bit when writing to rax, so no REX.W needed
+		'movzx eax, al', # It's either 0 or 1 and zero-extends to 64-bit when writing to eax, so no REX.W needed
 		'push rax',
 	]},
 	0x51 => { name => 'i64.eq', code => op_cmp('e', 'r') },
@@ -234,7 +234,7 @@ my %OPCODE = (
 	]},
 
 	# Logical operations are commutative and values are guaranteed to be zero-extended when put on stack;
-	# op(0, 0) is always 0 for and, or and xor, so it is safe to operate on 64-bit values directly
+	# `op(0, 0)` is always 0 for `and`, `or` and `xor`, so it is safe to operate on 64-bit values directly
 	0x71 => { name => 'i32.and', code => [ 'pop rax', 'and qword [rsp], rax' ] },
 	0x72 => { name => 'i32.or', code =>  [ 'pop rax', 'or qword [rsp], rax' ] },
 	0x73 => { name => 'i32.xor', code => [ 'pop rax', 'xor qword [rsp], rax' ] },
@@ -268,6 +268,8 @@ my %OPCODE = (
 );
 
 sub parse_code($findex, $fname, $locals) {
+	my $lblgid = 0;
+
 	sub gen_call($type, $dest) {
 		# FIXME: It's obviously possible to overwrite the WASM arguments frame with the ABI frame
 		# contents before the call and not to spend excessive stack space; it's just KISS for now
@@ -275,17 +277,25 @@ sub parse_code($findex, $fname, $locals) {
 		my $nstack_params = max(0, $type->{par}->@* - @abi_param_regs);
 		# [rsp] -> last argument
 		emitt 'push r10';
+
+		# FIXME: Call-time stack alignment is a dirty hack. It's only meaningful for host functions.
+		emitt 'push r13';
+		emitt 'mov r13, rsp';
+		emitt 'and rsp, -16';
+		emitt 'sub rsp, 8' if $nstack_params % 2;
+
 		if($type->{par}->@*) {
-			my $argoffset = 8; # [rsp+8] -> last argument
+			my $argoffset = 16;
 			if($nstack_params) {
+				# r13 is the stack pointer before alignment, [r13+16] -> last argument (as r10 and r13 are pushed)
 				for(1..$nstack_params) {
-					emitt "push qword [rsp+$argoffset]"; # [rsp+16] -> last argument; [rsp+24] -> next argument
-					$argoffset += 16
+					emitt "push qword [r13+$argoffset]";
+					$argoffset += 8
 				}
 			}
 			my @regs = @abi_param_regs[0..($nreg_params - 1)];
 			while(my $reg = pop @regs) {
-				emitt "mov $reg, [rsp+$argoffset]";
+				emitt "mov $reg, [r13+$argoffset]";
 				$argoffset += 8;
 			}
 		}
@@ -293,7 +303,9 @@ sub parse_code($findex, $fname, $locals) {
 		emitt 'xor rax, rax';
 		emitt "call $dest";
 
-		emitt 'add rsp, ' . ($nstack_params * 8) if $nstack_params; # Discard ABI call frame, if any
+		emitt 'mov rsp, r13'; # Discard ABI call frame and stack alignment padding
+		#emitt 'add rsp, ' . ($nstack_params * 8) if $nstack_params; # Discard ABI call frame, if any
+		emitt 'pop r13';
 		emitt 'pop r10';
 		emitt 'add rsp, ' . ($type->{par}->@* * 8) if $type->{par}->@*; # Discard WASM argument frame, if any
 
@@ -305,7 +317,6 @@ sub parse_code($findex, $fname, $locals) {
 			}
 		}
 	}
-	my $lblgid = 0;
 	my $blkid = 0;
 	my @frames = ({ type => 'func', rtype => $FTYPE[$findex]{type}{res}[0] });
 	emitt 'push rbp';
